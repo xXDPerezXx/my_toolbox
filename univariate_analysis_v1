@@ -1,0 +1,473 @@
+import pandas as pd
+import numpy as np
+from typing import Dict, Any, Optional, List, Tuple
+import warnings
+
+def analyze_numeric_series(series: pd.Series, percentiles: Optional[List[float]] = None) -> pd.DataFrame:
+    """
+    Performs a comprehensive univariate analysis on a numeric pandas Series.
+
+    Args:
+        series (pd.Series): The numeric Series to analyze.
+        percentiles (Optional[List[float]]): Custom percentiles to calculate (0-100 scale).
+                                           Defaults to [5, 10, 90, 95] for additional insights.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the univariate analysis metrics.
+    """
+    if not pd.api.types.is_numeric_dtype(series):
+        raise TypeError("Input series must be of a numeric data type.")
+
+    if percentiles is None:
+        percentiles = [5, 10, 90, 95]
+    
+    # Validate percentiles
+    if percentiles:
+        if not all(0 <= p <= 100 for p in percentiles):
+            raise ValueError("Percentiles must be between 0 and 100")
+
+    results = {}
+    total_len = len(series)
+    
+    # Handle edge case of empty series
+    if total_len == 0:
+        return _create_empty_numeric_result()
+
+    # 1. Basic Statistics
+    desc = series.describe()
+    results['Total_Count'] = total_len
+    results['Non_Null_Count'] = desc.get('count', 0)
+    results['Mean'] = desc.get('mean')
+    results['Std_Dev'] = desc.get('std')
+    results['Min'] = desc.get('min')
+    results['Q1_25th_Percentile'] = desc.get('25%')
+    results['Median_50th_Percentile'] = desc.get('50%')
+    results['Q3_75th_Percentile'] = desc.get('75%')
+    results['Max'] = desc.get('max')
+
+    # 2. Additional Percentiles
+    if percentiles and results['Non_Null_Count'] > 0:
+        for p in percentiles:
+            try:
+                results[f'P{p:g}_Percentile'] = series.quantile(p/100)
+            except:
+                results[f'P{p:g}_Percentile'] = np.nan
+
+    # 3. Enhanced Statistics
+    q1, q3 = results['Q1_25th_Percentile'], results['Q3_75th_Percentile']
+    
+    results['Range'] = (results['Max'] - results['Min']) if pd.notna(results['Max']) and pd.notna(results['Min']) else np.nan
+    results['IQR_Interquartile_Range'] = (q3 - q1) if pd.notna(q3) and pd.notna(q1) else np.nan
+    
+    # Coefficient of Variation (Enhanced logic)
+    std_dev, mean = results['Std_Dev'], results['Mean']
+    if pd.isna(std_dev) or pd.isna(mean):
+        results['Coefficient_of_Variation'] = np.nan
+    elif std_dev == 0.0:
+        results['Coefficient_of_Variation'] = 0.0
+    elif mean == 0.0:
+        results['Coefficient_of_Variation'] = np.inf
+    else:
+        results['Coefficient_of_Variation'] = abs(std_dev / mean)  # Use absolute value for interpretability
+
+    # 4. Distribution Shape
+    results['Skewness'] = series.skew()
+    results['Kurtosis'] = series.kurtosis()
+    
+    # Skewness interpretation
+    skew_val = results['Skewness']
+    if pd.notna(skew_val):
+        if abs(skew_val) < 0.5:
+            results['Skewness_Interpretation'] = 'Approximately_Symmetric'
+        elif skew_val > 0.5:
+            results['Skewness_Interpretation'] = 'Right_Skewed_Positive'
+        else:
+            results['Skewness_Interpretation'] = 'Left_Skewed_Negative'
+    else:
+        results['Skewness_Interpretation'] = 'Unknown'
+
+    # 5. Missing Values Analysis
+    missing_count = series.isnull().sum()
+    results['Missing_Values_Count'] = missing_count
+    results['Missing_Values_Percentage'] = (missing_count / total_len) * 100 if total_len > 0 else 0.0
+
+    # 6. Uniqueness Analysis
+    unique_count = series.nunique()
+    results['Unique_Values_Count'] = unique_count
+    results['Unique_Values_Percentage'] = (unique_count / results['Non_Null_Count']) * 100 if results['Non_Null_Count'] > 0 else 0.0
+    
+    # Data type insights
+    if unique_count == results['Non_Null_Count'] and results['Non_Null_Count'] > 1:
+        results['Data_Pattern'] = 'All_Values_Unique'
+    elif unique_count == 1:
+        results['Data_Pattern'] = 'Constant_Values'
+    elif unique_count <= 10 and results['Non_Null_Count'] > 10:
+        results['Data_Pattern'] = 'Limited_Categories'
+    else:
+        results['Data_Pattern'] = 'Varied_Distribution'
+
+    # 7. Outlier Detection (IQR Method)
+    if pd.notna(results['IQR_Interquartile_Range']) and results['IQR_Interquartile_Range'] > 0:
+        iqr = results['IQR_Interquartile_Range']
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        outliers = series[(series < lower_bound) | (series > upper_bound)]
+        results['Outliers_Count_IQR_Method'] = len(outliers)
+        results['Outliers_Percentage_IQR_Method'] = (len(outliers) / results['Non_Null_Count']) * 100 if results['Non_Null_Count'] > 0 else 0.0
+    else:
+        results['Outliers_Count_IQR_Method'] = 0
+        results['Outliers_Percentage_IQR_Method'] = 0.0
+
+    # 8. Data Quality Indicators
+    if results['Non_Null_Count'] > 0:
+        results['Data_Completeness_Score'] = ((total_len - missing_count) / total_len) * 100
+        
+        # Variability assessment
+        cv = results['Coefficient_of_Variation']
+        if pd.notna(cv) and cv != np.inf:
+            if cv < 0.1:
+                results['Variability_Assessment'] = 'Low_Variability'
+            elif cv < 0.3:
+                results['Variability_Assessment'] = 'Moderate_Variability'
+            else:
+                results['Variability_Assessment'] = 'High_Variability'
+        else:
+            results['Variability_Assessment'] = 'Cannot_Assess'
+    else:
+        results['Data_Completeness_Score'] = 0.0
+        results['Variability_Assessment'] = 'No_Data'
+
+    # Convert to DataFrame
+    df = pd.DataFrame.from_dict(results, orient='index', columns=['Value'])
+    df.index.name = 'Metric'
+    return df
+
+def analyze_categorical_series(series: pd.Series, top_n_categories: int = 10) -> pd.DataFrame:
+    """
+    Performs a comprehensive univariate analysis on a categorical pandas Series.
+
+    Args:
+        series (pd.Series): The categorical Series to analyze.
+        top_n_categories (int): Number of top categories to show in frequency distribution.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing the univariate analysis metrics
+                      and frequency distribution.
+    """
+    results = {}
+    total_len = len(series)
+    
+    # Handle edge case of empty series
+    if total_len == 0:
+        return _create_empty_categorical_result()
+
+    non_null_count = series.count()
+
+    # 1. Basic Statistics
+    results['Total_Count'] = total_len
+    results['Non_Null_Count'] = non_null_count
+    
+    # Mode calculation with better handling
+    if non_null_count > 0:
+        mode_values = series.mode()
+        if len(mode_values) > 0:
+            # Sort modes for consistency and limit to prevent excessive output
+            sorted_modes = sorted(mode_values.astype(str).tolist())
+            if len(sorted_modes) <= 5:
+                results['Mode'] = ', '.join(sorted_modes)
+            else:
+                results['Mode'] = f"{', '.join(sorted_modes[:5])} ... ({len(sorted_modes)} modes total)"
+            results['Mode_Count'] = len(mode_values)
+        else:
+            results['Mode'] = 'No_Mode'
+            results['Mode_Count'] = 0
+    else:
+        results['Mode'] = 'No_Data'
+        results['Mode_Count'] = 0
+
+    # 2. Uniqueness Analysis
+    unique_count = series.nunique()
+    results['Unique_Values_Count'] = unique_count
+    results['Unique_Values_Percentage'] = (unique_count / non_null_count) * 100 if non_null_count > 0 else 0.0
+
+    # 3. Missing Values Analysis
+    missing_count = series.isnull().sum()
+    results['Missing_Values_Count'] = missing_count
+    results['Missing_Values_Percentage'] = (missing_count / total_len) * 100 if total_len > 0 else 0.0
+
+    # 4. Distribution Analysis
+    if non_null_count > 0:
+        # Concentration analysis
+        if unique_count == 1:
+            results['Distribution_Type'] = 'Single_Category'
+        elif unique_count == non_null_count:
+            results['Distribution_Type'] = 'All_Unique'
+        elif unique_count <= 5:
+            results['Distribution_Type'] = 'Few_Categories'
+        elif unique_count <= 20:
+            results['Distribution_Type'] = 'Moderate_Categories'
+        else:
+            results['Distribution_Type'] = 'Many_Categories'
+
+        # Calculate entropy (measure of diversity)
+        value_counts = series.value_counts(normalize=True, dropna=True)
+        if len(value_counts) > 1:
+            entropy = -sum(p * np.log2(p) for p in value_counts if p > 0)
+            results['Entropy_Diversity_Score'] = entropy
+            results['Max_Possible_Entropy'] = np.log2(len(value_counts))
+            results['Normalized_Entropy'] = entropy / np.log2(len(value_counts)) if len(value_counts) > 1 else 0
+        else:
+            results['Entropy_Diversity_Score'] = 0.0
+            results['Max_Possible_Entropy'] = 0.0
+            results['Normalized_Entropy'] = 0.0
+
+        # Dominance analysis
+        if len(value_counts) > 0:
+            most_frequent_pct = value_counts.iloc[0] * 100
+            results['Most_Frequent_Category_Percentage'] = most_frequent_pct
+            
+            if most_frequent_pct >= 90:
+                results['Distribution_Balance'] = 'Highly_Dominated'
+            elif most_frequent_pct >= 70:
+                results['Distribution_Balance'] = 'Moderately_Dominated'
+            elif most_frequent_pct >= 50:
+                results['Distribution_Balance'] = 'Slightly_Dominated'
+            else:
+                results['Distribution_Balance'] = 'Well_Balanced'
+    else:
+        results['Distribution_Type'] = 'No_Data'
+        results['Entropy_Diversity_Score'] = 0.0
+        results['Most_Frequent_Category_Percentage'] = 0.0
+        results['Distribution_Balance'] = 'No_Data'
+
+    # 5. Data Quality Score
+    results['Data_Completeness_Score'] = ((total_len - missing_count) / total_len) * 100 if total_len > 0 else 0.0
+
+    # Initialize combined DataFrame
+    combined_df_data = []
+    
+    # Add basic metrics
+    for metric, value in results.items():
+        combined_df_data.append({
+            'Metric': metric, 
+            'Value': value, 
+            'Category_Detail': np.nan, 
+            'Category_Count': np.nan, 
+            'Category_Percentage': np.nan
+        })
+
+    # 6. Enhanced Frequency Distribution
+    if non_null_count > 0:
+        # Include both null and non-null values in frequency analysis
+        value_counts = series.value_counts(dropna=False)
+        relative_frequencies = series.value_counts(normalize=True, dropna=False) * 100
+        
+        # Limit to top N categories to prevent overwhelming output
+        top_categories = value_counts.head(top_n_categories)
+        
+        for i, (category, count) in enumerate(top_categories.items()):
+            percentage = relative_frequencies.loc[category]
+            category_display = 'Missing_Values' if pd.isna(category) else str(category)
+            
+            combined_df_data.append({
+                'Metric': 'Frequency_Distribution',
+                'Value': f'Rank_{i+1}',
+                'Category_Detail': category_display,
+                'Category_Count': count,
+                'Category_Percentage': percentage
+            })
+        
+        # Add summary if there are more categories
+        if len(value_counts) > top_n_categories:
+            remaining_count = len(value_counts) - top_n_categories
+            remaining_total = value_counts.iloc[top_n_categories:].sum()
+            remaining_pct = (remaining_total / total_len) * 100
+            
+            combined_df_data.append({
+                'Metric': 'Frequency_Distribution',
+                'Value': 'Other_Categories',
+                'Category_Detail': f'{remaining_count}_other_categories',
+                'Category_Count': remaining_total,
+                'Category_Percentage': remaining_pct
+            })
+
+    # Create final DataFrame
+    df_final = pd.DataFrame(combined_df_data)
+    if not df_final.empty:
+        df_final = df_final.set_index('Metric')
+    
+    return df_final
+
+def _create_empty_numeric_result() -> pd.DataFrame:
+    """Create a result DataFrame for empty numeric series."""
+    empty_results = {
+        'Total_Count': 0,
+        'Non_Null_Count': 0,
+        'Mean': np.nan,
+        'Std_Dev': np.nan,
+        'Min': np.nan,
+        'Max': np.nan,
+        'Missing_Values_Count': 0,
+        'Missing_Values_Percentage': 0.0,
+        'Unique_Values_Count': 0,
+        'Data_Pattern': 'Empty_Series'
+    }
+    df = pd.DataFrame.from_dict(empty_results, orient='index', columns=['Value'])
+    df.index.name = 'Metric'
+    return df
+
+def _create_empty_categorical_result() -> pd.DataFrame:
+    """Create a result DataFrame for empty categorical series."""
+    empty_results = {
+        'Total_Count': 0,
+        'Non_Null_Count': 0,
+        'Mode': 'No_Data',
+        'Unique_Values_Count': 0,
+        'Missing_Values_Count': 0,
+        'Missing_Values_Percentage': 0.0,
+        'Distribution_Type': 'Empty_Series'
+    }
+    df = pd.DataFrame.from_dict(empty_results, orient='index', columns=['Value'])
+    df.index.name = 'Metric'
+    return df
+
+def generate_insights(analysis_df: pd.DataFrame, series_name: str = "Series", 
+                     is_numeric: bool = True) -> List[str]:
+    """
+    Generate human-readable insights from univariate analysis results.
+    
+    Args:
+        analysis_df (pd.DataFrame): Result from analyze_numeric_series or analyze_categorical_series
+        series_name (str): Name of the series for personalized insights
+        is_numeric (bool): Whether this is a numeric series analysis
+        
+    Returns:
+        List[str]: List of insight bullet points
+    """
+    insights = []
+    
+    try:
+        if is_numeric:
+            insights.extend(_generate_numeric_insights(analysis_df, series_name))
+        else:
+            insights.extend(_generate_categorical_insights(analysis_df, series_name))
+    except Exception as e:
+        insights.append(f"⚠️ Error generating insights: {str(e)}")
+    
+    return insights
+
+def _generate_numeric_insights(df: pd.DataFrame, series_name: str) -> List[str]:
+    """Generate insights for numeric data."""
+    insights = []
+    
+    # Data completeness
+    if 'Missing_Values_Percentage' in df.index:
+        missing_pct = df.loc['Missing_Values_Percentage', 'Value']
+        if missing_pct == 0:
+            insights.append(f"✅ {series_name} has complete data with no missing values")
+        elif missing_pct < 5:
+            insights.append(f"⚠️ {series_name} has minimal missing data ({missing_pct:.1f}%)")
+        elif missing_pct < 20:
+            insights.append(f"🔶 {series_name} has moderate missing data ({missing_pct:.1f}%) - consider imputation")
+        else:
+            insights.append(f"🔴 {series_name} has significant missing data ({missing_pct:.1f}%) - investigate data quality")
+    
+    # Central tendency and spread
+    if all(metric in df.index for metric in ['Mean', 'Median_50th_Percentile', 'Std_Dev']):
+        mean = df.loc['Mean', 'Value']
+        median = df.loc['Median_50th_Percentile', 'Value']
+        std_dev = df.loc['Std_Dev', 'Value']
+        
+        if pd.notna(mean) and pd.notna(median):
+            if abs(mean - median) / max(abs(mean), abs(median), 1) < 0.1:
+                insights.append(f"📊 {series_name} has a symmetric distribution (mean ≈ median: {mean:.2f} ≈ {median:.2f})")
+            elif mean > median:
+                insights.append(f"📈 {series_name} is right-skewed (mean {mean:.2f} > median {median:.2f})")
+            else:
+                insights.append(f"📉 {series_name} is left-skewed (mean {mean:.2f} < median {median:.2f})")
+    
+    # Variability assessment
+    if 'Variability_Assessment' in df.index:
+        var_assessment = df.loc['Variability_Assessment', 'Value']
+        cv = df.loc.get('Coefficient_of_Variation', {}).get('Value', np.nan)
+        
+        if var_assessment == 'Low_Variability':
+            insights.append(f"📌 {series_name} shows low variability (CV: {cv:.3f}) - values are quite consistent")
+        elif var_assessment == 'Moderate_Variability':
+            insights.append(f"📊 {series_name} shows moderate variability (CV: {cv:.3f}) - typical spread")
+        elif var_assessment == 'High_Variability':
+            insights.append(f"📈 {series_name} shows high variability (CV: {cv:.3f}) - values are widely spread")
+    
+    # Outlier detection
+    if 'Outliers_Percentage_IQR_Method' in df.index:
+        outlier_pct = df.loc['Outliers_Percentage_IQR_Method', 'Value']
+        if outlier_pct > 10:
+            insights.append(f"⚠️ {series_name} has many outliers ({outlier_pct:.1f}%) - investigate extreme values")
+        elif outlier_pct > 5:
+            insights.append(f"🔍 {series_name} has some outliers ({outlier_pct:.1f}%) - review for data quality")
+        elif outlier_pct > 0:
+            insights.append(f"✅ {series_name} has few outliers ({outlier_pct:.1f}%) - normal distribution")
+    
+    # Data pattern insights
+    if 'Data_Pattern' in df.index:
+        pattern = df.loc['Data_Pattern', 'Value']
+        if pattern == 'All_Values_Unique':
+            insights.append(f"🔢 {series_name} contains all unique values - possibly an identifier or continuous measurement")
+        elif pattern == 'Constant_Values':
+            insights.append(f"⚪ {series_name} contains only constant values - no variation in the data")
+        elif pattern == 'Limited_Categories':
+            insights.append(f"🏷️ {series_name} has limited distinct values - might be better treated as categorical")
+    
+    return insights
+
+def _generate_categorical_insights(df: pd.DataFrame, series_name: str) -> List[str]:
+    """Generate insights for categorical data."""
+    insights = []
+    
+    # Data completeness
+    if 'Missing_Values_Percentage' in df.index:
+        missing_pct = df.loc['Missing_Values_Percentage', 'Value']
+        if missing_pct == 0:
+            insights.append(f"✅ {series_name} has complete data with no missing values")
+        elif missing_pct < 5:
+            insights.append(f"⚠️ {series_name} has minimal missing data ({missing_pct:.1f}%)")
+        else:
+            insights.append(f"🔴 {series_name} has significant missing data ({missing_pct:.1f}%)")
+    
+    # Distribution balance
+    if 'Distribution_Balance' in df.index:
+        balance = df.loc['Distribution_Balance', 'Value']
+        dominant_pct = df.loc.get('Most_Frequent_Category_Percentage', {}).get('Value', 0)
+        
+        if balance == 'Highly_Dominated':
+            insights.append(f"⚠️ {series_name} is highly dominated by one category ({dominant_pct:.1f}%) - low diversity")
+        elif balance == 'Well_Balanced':
+            insights.append(f"✅ {series_name} has a well-balanced distribution across categories")
+        elif balance == 'Moderately_Dominated':
+            insights.append(f"📊 {series_name} is moderately dominated by one category ({dominant_pct:.1f}%)")
+    
+    # Diversity analysis
+    if 'Normalized_Entropy' in df.index:
+        entropy = df.loc['Normalized_Entropy', 'Value']
+        if entropy > 0.8:
+            insights.append(f"🌈 {series_name} has high diversity (entropy: {entropy:.2f}) - categories are well-distributed")
+        elif entropy > 0.5:
+            insights.append(f"📊 {series_name} has moderate diversity (entropy: {entropy:.2f})")
+        else:
+            insights.append(f"📌 {series_name} has low diversity (entropy: {entropy:.2f}) - few categories dominate")
+    
+    # Category count insights
+    if 'Unique_Values_Count' in df.index:
+        unique_count = df.loc['Unique_Values_Count', 'Value']
+        total_count = df.loc.get('Non_Null_Count', {}).get('Value', 0)
+        
+        if unique_count == 1:
+            insights.append(f"⚪ {series_name} contains only one category - no variation")
+        elif unique_count == total_count:
+            insights.append(f"🔢 {series_name} has all unique values - possibly identifiers")
+        elif unique_count <= 5:
+            insights.append(f"🏷️ {series_name} has few categories ({unique_count}) - simple classification")
+        elif unique_count > 50:
+            insights.append(f"🌐 {series_name} has many categories ({unique_count}) - consider grouping")
+    
+    return insights
