@@ -1,0 +1,523 @@
+import pandas as pd
+import numpy as np
+import json
+from scipy.stats import skew, kurtosis
+from datetime import datetime, timedelta
+import re
+from typing import Dict, Any, List, Union
+
+def evaluate_column(df: pd.DataFrame, column_name: str, top_N: int = 10) -> pd.DataFrame:
+    """
+    Evaluates a single column of a Pandas DataFrame and returns a comprehensive
+    analysis with enhanced insights and readability.
+
+    Args:
+        df (pd.DataFrame): The input Pandas DataFrame.
+        column_name (str): The name of the column to evaluate.
+        top_N (int, optional): The number of top unique elements to show. Defaults to 10.
+
+    Returns:
+        pd.DataFrame: A DataFrame with detailed column evaluation including:
+            - Basic info (name, type, counts, missing data)
+            - Data quality metrics
+            - Distribution analysis
+            - Pattern detection
+            - Summary statistics
+            - Insights and recommendations
+    """
+    if column_name not in df.columns:
+        raise ValueError(f"Column '{column_name}' not found in the DataFrame.")
+
+    column = df[column_name]
+    total_rows = len(df)
+    non_missing_rows = column.count()
+    missing_rows = total_rows - non_missing_rows
+    missing_percentage = (missing_rows / total_rows) * 100 if total_rows > 0 else 0
+
+    unique_records = column.nunique()
+    unique_percentage = (unique_records / total_rows) * 100 if total_rows > 0 else 0
+
+    # Enhanced data type detection
+    inferred_type, confidence = _infer_enhanced_data_type(column)
+    
+    # Data quality assessment
+    quality_score, quality_issues = _assess_data_quality(column, total_rows)
+    
+    # Pattern detection
+    patterns = _detect_patterns(column)
+    
+    # Enhanced distribution analysis
+    distribution_analysis = _analyze_distribution(column, total_rows, top_N)
+    
+    # Enhanced summary statistics
+    summary_stats = _calculate_enhanced_statistics(column, inferred_type)
+    
+    # Generate insights and recommendations
+    insights = _generate_insights(column, inferred_type, quality_score, quality_issues, patterns)
+    
+    # Memory usage estimation
+    memory_usage = _estimate_memory_usage(column)
+
+    # Create the result DataFrame
+    result_df = pd.DataFrame([{
+        'Column_Name': column_name,
+        'Datatype': str(column.dtype),
+        'Inferred_Type': inferred_type,
+        'Type_Confidence': confidence,
+        'Total_Rows': total_rows,
+        'Non_Missing_Rows': non_missing_rows,
+        'Missing_Rows': missing_rows,
+        'Missing_Percentage': round(missing_percentage, 2),
+        'Unique_Records': unique_records,
+        'Unique_Percentage': round(unique_percentage, 2),
+        'Data_Quality_Score': quality_score,
+        'Quality_Issues': json.dumps(quality_issues),
+        'Patterns_Detected': json.dumps(patterns),
+        'Distribution_Analysis': json.dumps(distribution_analysis),
+        'Summary_Statistics': json.dumps(summary_stats),
+        'Memory_Usage_MB': memory_usage,
+        'Insights_And_Recommendations': json.dumps(insights)
+    }])
+
+    return result_df
+
+def _infer_enhanced_data_type(column: pd.Series) -> tuple[str, float]:
+    """Infer the enhanced data type with confidence score."""
+    non_null_col = column.dropna()
+    if len(non_null_col) == 0:
+        return "empty", 1.0
+    
+    # Check for datetime patterns
+    if _is_likely_datetime(non_null_col):
+        return "datetime", 0.9
+    
+    # Check for categorical with high confidence
+    if non_null_col.dtype == 'object':
+        unique_ratio = non_null_col.nunique() / len(non_null_col)
+        if unique_ratio < 0.1:
+            return "categorical", 0.95
+        elif unique_ratio < 0.5:
+            return "categorical", 0.7
+        elif _is_likely_text(non_null_col):
+            return "text", 0.8
+        else:
+            return "mixed", 0.6
+    
+    # Numeric types
+    if pd.api.types.is_numeric_dtype(non_null_col):
+        if pd.api.types.is_integer_dtype(non_null_col):
+            # Check if it might be categorical integers
+            unique_ratio = non_null_col.nunique() / len(non_null_col)
+            if unique_ratio < 0.1:
+                return "categorical_numeric", 0.8
+            return "integer", 0.95
+        else:
+            return "float", 0.95
+    
+    # Boolean
+    if pd.api.types.is_bool_dtype(non_null_col):
+        return "boolean", 1.0
+    
+    return "unknown", 0.0
+
+def _is_likely_datetime(column: pd.Series) -> bool:
+    """Check if column contains datetime-like strings."""
+    if len(column) == 0:
+        return False
+    
+    sample_size = min(100, len(column))
+    sample = column.sample(n=sample_size, random_state=42)
+    
+    datetime_patterns = [
+        r'\d{4}-\d{2}-\d{2}',  # YYYY-MM-DD
+        r'\d{2}/\d{2}/\d{4}',  # MM/DD/YYYY
+        r'\d{2}-\d{2}-\d{4}',  # MM-DD-YYYY
+        r'\d{4}/\d{2}/\d{2}',  # YYYY/MM/DD
+    ]
+    
+    matches = 0
+    for value in sample.astype(str):
+        for pattern in datetime_patterns:
+            if re.search(pattern, value):
+                matches += 1
+                break
+    
+    return matches / sample_size > 0.7
+
+def _is_likely_text(column: pd.Series) -> bool:
+    """Check if column contains meaningful text (not just short codes)."""
+    if len(column) == 0:
+        return False
+    
+    sample_size = min(50, len(column))
+    sample = column.sample(n=sample_size, random_state=42)
+    
+    avg_length = sample.astype(str).str.len().mean()
+    has_spaces = sample.astype(str).str.contains(' ').sum() / len(sample)
+    
+    return avg_length > 10 or has_spaces > 0.3
+
+def _assess_data_quality(column: pd.Series, total_rows: int) -> tuple[float, List[str]]:
+    """Assess data quality and return score with issues list."""
+    issues = []
+    score = 100.0
+    
+    # Missing data penalty
+    missing_pct = (total_rows - column.count()) / total_rows * 100
+    if missing_pct > 50:
+        issues.append(f"High missing data: {missing_pct:.1f}%")
+        score -= 30
+    elif missing_pct > 20:
+        issues.append(f"Moderate missing data: {missing_pct:.1f}%")
+        score -= 15
+    elif missing_pct > 5:
+        issues.append(f"Some missing data: {missing_pct:.1f}%")
+        score -= 5
+    
+    # Duplicate percentage
+    if column.count() > 0:
+        duplicate_pct = (column.count() - column.nunique()) / column.count() * 100
+        if duplicate_pct > 90:
+            issues.append(f"Very high duplication: {duplicate_pct:.1f}%")
+            score -= 20
+        elif duplicate_pct > 50:
+            issues.append(f"High duplication: {duplicate_pct:.1f}%")
+            score -= 10
+    
+    # Check for potential data entry errors in text columns
+    if column.dtype == 'object':
+        non_null = column.dropna()
+        if len(non_null) > 0:
+            # Check for inconsistent casing
+            if _has_inconsistent_casing(non_null):
+                issues.append("Inconsistent text casing detected")
+                score -= 5
+            
+            # Check for leading/trailing whitespace
+            if _has_whitespace_issues(non_null):
+                issues.append("Leading/trailing whitespace detected")
+                score -= 5
+    
+    # Numeric outliers
+    if pd.api.types.is_numeric_dtype(column):
+        outlier_pct = _calculate_outlier_percentage(column)
+        if outlier_pct > 10:
+            issues.append(f"High outlier percentage: {outlier_pct:.1f}%")
+            score -= 10
+        elif outlier_pct > 5:
+            issues.append(f"Moderate outliers: {outlier_pct:.1f}%")
+            score -= 5
+    
+    return max(0, score), issues
+
+def _has_inconsistent_casing(column: pd.Series) -> bool:
+    """Check for inconsistent casing in text data."""
+    sample = column.sample(n=min(100, len(column)), random_state=42)
+    text_values = sample.astype(str)
+    
+    has_upper = text_values.str.isupper().any()
+    has_lower = text_values.str.islower().any()
+    has_title = text_values.str.istitle().any()
+    
+    return sum([has_upper, has_lower, has_title]) > 1
+
+def _has_whitespace_issues(column: pd.Series) -> bool:
+    """Check for leading/trailing whitespace issues."""
+    sample = column.sample(n=min(100, len(column)), random_state=42)
+    text_values = sample.astype(str)
+    
+    return (text_values != text_values.str.strip()).any()
+
+def _calculate_outlier_percentage(column: pd.Series) -> float:
+    """Calculate percentage of outliers using IQR method."""
+    numeric_col = pd.to_numeric(column, errors='coerce').dropna()
+    if len(numeric_col) < 4:
+        return 0.0
+    
+    Q1 = numeric_col.quantile(0.25)
+    Q3 = numeric_col.quantile(0.75)
+    IQR = Q3 - Q1
+    
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    
+    outliers = numeric_col[(numeric_col < lower_bound) | (numeric_col > upper_bound)]
+    return len(outliers) / len(numeric_col) * 100
+
+def _detect_patterns(column: pd.Series) -> Dict[str, Any]:
+    """Detect common patterns in the data."""
+    patterns = {}
+    non_null = column.dropna()
+    
+    if len(non_null) == 0:
+        return patterns
+    
+    if column.dtype == 'object':
+        sample = non_null.sample(n=min(100, len(non_null)), random_state=42).astype(str)
+        
+        # Email pattern
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        email_matches = sample.str.contains(email_pattern, regex=True).sum()
+        if email_matches > len(sample) * 0.5:
+            patterns['email_like'] = f"{email_matches}/{len(sample)} values"
+        
+        # Phone pattern
+        phone_pattern = r'(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+        phone_matches = sample.str.contains(phone_pattern, regex=True).sum()
+        if phone_matches > len(sample) * 0.5:
+            patterns['phone_like'] = f"{phone_matches}/{len(sample)} values"
+        
+        # URL pattern
+        url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        url_matches = sample.str.contains(url_pattern, regex=True).sum()
+        if url_matches > len(sample) * 0.3:
+            patterns['url_like'] = f"{url_matches}/{len(sample)} values"
+        
+        # Length consistency
+        lengths = sample.str.len()
+        if lengths.nunique() == 1:
+            patterns['fixed_length'] = f"All values have length {lengths.iloc[0]}"
+        elif lengths.std() < 2:
+            patterns['consistent_length'] = f"Length varies from {lengths.min()} to {lengths.max()}"
+    
+    return patterns
+
+def _analyze_distribution(column: pd.Series, total_rows: int, top_N: int) -> Dict[str, Any]:
+    """Enhanced distribution analysis."""
+    analysis = {}
+    
+    # Basic distribution
+    value_counts = column.value_counts(dropna=False)
+    top_n_counts = value_counts.head(top_N)
+    
+    distribution_data = {}
+    for value, count in top_n_counts.items():
+        percentage = (count / total_rows) * 100
+        key = "NULL" if pd.isna(value) else str(value)
+        distribution_data[key] = {
+            'count': int(count),
+            'percentage': round(percentage, 2)
+        }
+    
+    analysis['top_values'] = distribution_data
+    
+    # Distribution characteristics
+    if len(value_counts) > 0:
+        analysis['most_common_value'] = str(value_counts.index[0]) if not pd.isna(value_counts.index[0]) else "NULL"
+        analysis['most_common_frequency'] = int(value_counts.iloc[0])
+        analysis['most_common_percentage'] = round((value_counts.iloc[0] / total_rows) * 100, 2)
+        
+        # Concentration analysis
+        top_5_pct = value_counts.head(5).sum() / total_rows * 100
+        analysis['top_5_concentration'] = round(top_5_pct, 2)
+        
+        # Distribution uniformity
+        if len(value_counts) > 1:
+            expected_freq = total_rows / len(value_counts)
+            chi_square = ((value_counts - expected_freq) ** 2 / expected_freq).sum()
+            analysis['uniformity_score'] = round(1 / (1 + chi_square / total_rows), 3)
+        else:
+            analysis['uniformity_score'] = 0.0
+    
+    return analysis
+
+def _calculate_enhanced_statistics(column: pd.Series, inferred_type: str) -> Dict[str, Any]:
+    """Calculate enhanced statistics based on inferred type."""
+    stats = {}
+    
+    if inferred_type in ['integer', 'float']:
+        numeric_col = column.dropna()
+        if len(numeric_col) > 0:
+            desc = numeric_col.describe()
+            stats.update({
+                'count': int(desc['count']),
+                'mean': round(desc['mean'], 4),
+                'std': round(desc['std'], 4),
+                'min': round(desc['min'], 4),
+                'q1': round(desc['25%'], 4),
+                'median': round(desc['50%'], 4),
+                'q3': round(desc['75%'], 4),
+                'max': round(desc['max'], 4),
+                'range': round(desc['max'] - desc['min'], 4),
+                'coefficient_of_variation': round(desc['std'] / desc['mean'], 4) if desc['mean'] != 0 else np.inf
+            })
+            
+            if len(numeric_col) > 1:
+                stats['skewness'] = round(skew(numeric_col), 4)
+                stats['kurtosis'] = round(kurtosis(numeric_col), 4)
+                
+                # Interpretations
+                if abs(stats['skewness']) < 0.5:
+                    stats['skewness_interpretation'] = "approximately symmetric"
+                elif stats['skewness'] > 0.5:
+                    stats['skewness_interpretation'] = "right-skewed (positive)"
+                else:
+                    stats['skewness_interpretation'] = "left-skewed (negative)"
+                
+                if stats['kurtosis'] > 3:
+                    stats['kurtosis_interpretation'] = "heavy-tailed (leptokurtic)"
+                elif stats['kurtosis'] < 3:
+                    stats['kurtosis_interpretation'] = "light-tailed (platykurtic)"
+                else:
+                    stats['kurtosis_interpretation'] = "normal-tailed (mesokurtic)"
+    
+    elif inferred_type in ['categorical', 'categorical_numeric', 'text']:
+        non_null = column.dropna()
+        if len(non_null) > 0:
+            modes = non_null.mode()
+            stats['mode_count'] = len(modes)
+            if len(modes) > 0:
+                stats['primary_mode'] = str(modes.iloc[0])
+                mode_freq = (non_null == modes.iloc[0]).sum()
+                stats['mode_frequency'] = int(mode_freq)
+                stats['mode_percentage'] = round(mode_freq / len(column) * 100, 2)
+            
+            # Text-specific stats
+            if inferred_type == 'text':
+                text_lengths = non_null.astype(str).str.len()
+                stats['avg_text_length'] = round(text_lengths.mean(), 2)
+                stats['min_text_length'] = int(text_lengths.min())
+                stats['max_text_length'] = int(text_lengths.max())
+    
+    return stats
+
+def _generate_insights(column: pd.Series, inferred_type: str, quality_score: float, 
+                      quality_issues: List[str], patterns: Dict[str, Any]) -> List[str]:
+    """Generate actionable insights and recommendations."""
+    insights = []
+    
+    # Data quality insights
+    if quality_score < 70:
+        insights.append(f"⚠️ Low data quality score ({quality_score:.1f}/100). Consider data cleaning.")
+    elif quality_score < 85:
+        insights.append(f"📊 Moderate data quality ({quality_score:.1f}/100). Some improvements possible.")
+    else:
+        insights.append(f"✅ Good data quality ({quality_score:.1f}/100).")
+    
+    # Missing data insights
+    missing_pct = (len(column) - column.count()) / len(column) * 100
+    if missing_pct > 20:
+        insights.append(f"🚨 High missing data ({missing_pct:.1f}%). Consider imputation or investigation.")
+    elif missing_pct > 5:
+        insights.append(f"⚠️ Some missing data ({missing_pct:.1f}%). Monitor for patterns.")
+    
+    # Uniqueness insights
+    unique_pct = column.nunique() / len(column) * 100
+    if unique_pct > 95:
+        insights.append("🔑 High uniqueness suggests this could be an identifier or key.")
+    elif unique_pct < 5:
+        insights.append("📊 Low uniqueness indicates this is likely a categorical variable.")
+    
+    # Type-specific insights
+    if inferred_type == 'categorical' and column.nunique() > 50:
+        insights.append("📈 High cardinality categorical data may benefit from grouping rare categories.")
+    
+    if inferred_type in ['integer', 'float']:
+        numeric_col = column.dropna()
+        if len(numeric_col) > 0:
+            if numeric_col.min() >= 0 and numeric_col.max() <= 1:
+                insights.append("📏 Values appear to be normalized (0-1 range) or represent proportions.")
+            elif (numeric_col == numeric_col.astype(int)).all():
+                insights.append("🔢 Float column contains only integer values - consider converting to int.")
+    
+    # Pattern insights
+    if patterns:
+        for pattern_type, description in patterns.items():
+            if pattern_type == 'email_like':
+                insights.append(f"📧 Email pattern detected in {description}")
+            elif pattern_type == 'phone_like':
+                insights.append(f"📞 Phone number pattern detected in {description}")
+            elif pattern_type == 'url_like':
+                insights.append(f"🔗 URL pattern detected in {description}")
+            elif pattern_type == 'fixed_length':
+                insights.append(f"📏 {description} - possible code or identifier")
+    
+    return insights
+
+def _estimate_memory_usage(column: pd.Series) -> float:
+    """Estimate memory usage in MB."""
+    return column.memory_usage(deep=True) / (1024 * 1024)
+
+# Utility function for pretty printing results
+def print_column_evaluation(result_df: pd.DataFrame, detailed: bool = True):
+    """
+    Pretty print the column evaluation results.
+    
+    Args:
+        result_df: DataFrame returned by evaluate_column
+        detailed: Whether to show detailed statistics
+    """
+    if len(result_df) == 0:
+        print("No evaluation results to display.")
+        return
+    
+    row = result_df.iloc[0]
+    
+    print(f"\n{'='*80}")
+    print(f"COLUMN EVALUATION: {row['Column_Name']}")
+    print(f"{'='*80}")
+    
+    # Basic Information
+    print(f"\n📋 BASIC INFORMATION")
+    print(f"   Pandas Dtype: {row['Datatype']}")
+    print(f"   Inferred Type: {row['Inferred_Type']} (confidence: {row['Type_Confidence']:.2f})")
+    print(f"   Total Rows: {row['Total_Rows']:,}")
+    print(f"   Non-Missing: {row['Non_Missing_Rows']:,}")
+    print(f"   Missing: {row['Missing_Rows']:,} ({row['Missing_Percentage']:.2f}%)")
+    print(f"   Unique Values: {row['Unique_Records']:,} ({row['Unique_Percentage']:.2f}%)")
+    print(f"   Memory Usage: {row['Memory_Usage_MB']:.2f} MB")
+    
+    # Data Quality
+    print(f"\n🔍 DATA QUALITY")
+    print(f"   Quality Score: {row['Data_Quality_Score']:.1f}/100")
+    quality_issues = json.loads(row['Quality_Issues'])
+    if quality_issues:
+        for issue in quality_issues:
+            print(f"   ⚠️  {issue}")
+    else:
+        print(f"   ✅ No quality issues detected")
+    
+    # Patterns
+    patterns = json.loads(row['Patterns_Detected'])
+    if patterns:
+        print(f"\n🔍 PATTERNS DETECTED")
+        for pattern, description in patterns.items():
+            print(f"   • {pattern}: {description}")
+    
+    # Distribution
+    print(f"\n📊 DISTRIBUTION ANALYSIS")
+    dist_analysis = json.loads(row['Distribution_Analysis'])
+    if 'most_common_value' in dist_analysis:
+        print(f"   Most Common: '{dist_analysis['most_common_value']}' "
+              f"({dist_analysis['most_common_frequency']:,} times, "
+              f"{dist_analysis['most_common_percentage']:.1f}%)")
+    
+    if 'top_5_concentration' in dist_analysis:
+        print(f"   Top 5 Values: {dist_analysis['top_5_concentration']:.1f}% of data")
+    
+    if 'uniformity_score' in dist_analysis:
+        uniformity = dist_analysis['uniformity_score']
+        if uniformity > 0.8:
+            uniformity_desc = "highly uniform"
+        elif uniformity > 0.5:
+            uniformity_desc = "moderately uniform"
+        else:
+            uniformity_desc = "highly skewed"
+        print(f"   Distribution: {uniformity_desc} (score: {uniformity:.3f})")
+    
+    # Statistics
+    if detailed:
+        print(f"\n📈 SUMMARY STATISTICS")
+        stats = json.loads(row['Summary_Statistics'])
+        for key, value in stats.items():
+            if key.endswith('_interpretation'):
+                continue
+            print(f"   {key.replace('_', ' ').title()}: {value}")
+    
+    # Insights
+    print(f"\n💡 INSIGHTS & RECOMMENDATIONS")
+    insights = json.loads(row['Insights_And_Recommendations'])
+    for insight in insights:
+        print(f"   {insight}")
+    
+    print(f"\n{'='*80}")
