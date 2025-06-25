@@ -1,0 +1,138 @@
+# Cell 3: evaluate_column function definition
+
+import pandas as pd
+import numpy as np
+import json
+from scipy.stats import skew, kurtosis
+from datetime import datetime, timedelta
+
+def evaluate_column(df: pd.DataFrame, column_name: str, top_N: int = 10) -> pd.DataFrame:
+    """
+    Evaluates a single column of a Pandas DataFrame and returns a Pandas DataFrame
+    with a single row containing various statistics about that column.
+
+    Args:
+        df (pd.DataFrame): The input Pandas DataFrame.
+        column_name (str): The name of the column to evaluate.
+        top_N (int, optional): The number of top unique elements to show in the
+                               distribution and mode summary. Defaults to 10.
+
+    Returns:
+        pd.DataFrame: A DataFrame with a single row containing the evaluation.
+    """
+    if column_name not in df.columns:
+        raise ValueError(f"Column '{column_name}' not found in the DataFrame.")
+
+    column = df[column_name]
+    total_rows = len(df)
+    non_missing_rows = column.count() # count() excludes NaN
+    missing_rows = total_rows - non_missing_rows
+    missing_percentage = (missing_rows / total_rows) * 100 if total_rows > 0 else 0
+
+    unique_records = column.nunique()
+    unique_percentage = (unique_records / total_rows) * 100 if total_rows > 0 else 0
+
+    # --- Top_N_Distribution ---
+    # value_counts() includes NaN if dropna=False, which is what we want for total distribution consideration
+    value_counts_full = column.value_counts(dropna=False)
+    top_n_counts = value_counts_full.head(top_N)
+
+    top_n_distribution_data = {}
+    for value, count in top_n_counts.items():
+        percentage = (count / total_rows) * 100
+        # Convert NaN to string for JSON serialization if it's the value itself
+        key = str(value) if pd.isna(value) else value
+        top_n_distribution_data[key] = {
+            'count': int(count), # Ensure int for JSON serialization
+            'percentage': round(percentage, 2)
+        }
+    # Convert to JSON string for embedding in DataFrame cell
+    top_n_distribution_json = json.dumps(top_n_distribution_data)
+
+    # --- Summary_Statistics ---
+    summary_stats = {}
+    if pd.api.types.is_numeric_dtype(column):
+        # Numeric statistics
+        # Ensure we only describe non-NaN values for standard stats
+        numeric_col_no_na = column.dropna()
+        if not numeric_col_no_na.empty:
+            desc = numeric_col_no_na.describe().to_dict()
+            summary_stats['count'] = int(desc.get('count', 0))
+            summary_stats['mean'] = round(desc.get('mean', np.nan), 2)
+            summary_stats['std'] = round(desc.get('std', np.nan), 2)
+            summary_stats['min'] = round(desc.get('min', np.nan), 2)
+            summary_stats['25%'] = round(desc.get('25%', np.nan), 2)
+            summary_stats['50%_median'] = round(desc.get('50%', np.nan), 2)
+            summary_stats['75%'] = round(desc.get('75%', np.nan), 2)
+            summary_stats['max'] = round(desc.get('max', np.nan), 2)
+            if len(numeric_col_no_na) > 1: # Skewness and Kurtosis require at least 2 non-missing values
+                summary_stats['skewness'] = round(skew(numeric_col_no_na), 2)
+                summary_stats['kurtosis'] = round(kurtosis(numeric_col_no_na), 2)
+            else:
+                summary_stats['skewness'] = np.nan
+                summary_stats['kurtosis'] = np.nan
+        else: # Handle case where all numeric values are NaN or empty
+            summary_stats['count'] = 0
+            summary_stats['mean'] = np.nan
+            summary_stats['std'] = np.nan
+            summary_stats['min'] = np.nan
+            summary_stats['25%'] = np.nan
+            summary_stats['50%_median'] = np.nan
+            summary_stats['75%'] = np.nan
+            summary_stats['max'] = np.nan
+            summary_stats['skewness'] = np.nan
+            summary_stats['kurtosis'] = np.nan
+
+    else:
+        # Categorical/Object statistics
+        # Ensure modes are calculated on non-NaN values for meaningful modes
+        modes_calc_col = column.dropna()
+        if not modes_calc_col.empty:
+            modes = modes_calc_col.mode().tolist() # Get all modes
+            summary_stats['num_modes'] = len(modes)
+
+            if modes:
+                # Get frequency of the first mode (they all have the same highest freq)
+                mode_freq = modes_calc_col.value_counts().max()
+                summary_stats['mode_frequency'] = int(mode_freq)
+                summary_stats['mode_percentage'] = round((mode_freq / total_rows) * 100, 2)
+
+                # Handle top_N modes for display
+                # Ensure consistent sorting for reproducibility of '...'
+                sorted_modes = sorted(modes, key=lambda x: str(x)) # Sort by string representation for mixed types
+
+                if len(sorted_modes) > top_N:
+                    modes_display = sorted_modes[:top_N]
+                    modes_display.append('...')
+                else:
+                    modes_display = sorted_modes
+                summary_stats['top_modes'] = [str(m) if pd.isna(m) else m for m in modes_display]
+            else: # Should not happen if modes_calc_col is not empty, but for safety
+                summary_stats['mode_frequency'] = 0
+                summary_stats['mode_percentage'] = 0.0
+                summary_stats['top_modes'] = []
+        else: # Column is entirely NaN or empty after dropping NaNs
+            summary_stats['num_modes'] = 0
+            summary_stats['mode_frequency'] = 0
+            summary_stats['mode_percentage'] = 0.0
+            summary_stats['top_modes'] = []
+
+
+    # Convert to JSON string for embedding in DataFrame cell
+    summary_stats_json = json.dumps(summary_stats)
+
+    # Create the result DataFrame
+    result_df = pd.DataFrame([{
+        'Column_Name': column_name,
+        'Datatype': str(column.dtype),
+        'Total_Rows': total_rows,
+        'Non_Missing_Rows': non_missing_rows,
+        'Missing_Rows': missing_rows,
+        'Missing_Percentage': round(missing_percentage, 2),
+        'Unique_Records': unique_records,
+        'Unique_Percentage': round(unique_percentage, 2),
+        'Top_N_Distribution': top_n_distribution_json,
+        'Summary_Statistics': summary_stats_json
+    }])
+
+    return result_df
