@@ -1,0 +1,92 @@
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+def univariate_analysis(df, column, plot=True):
+    """
+    Performs a detailed univariate analysis of a column in a DataFrame.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame.
+        column (str): Column name to analyze.
+        plot (bool): Whether to show a plot (histogram or bar plot).
+
+    Returns:
+        pd.DataFrame: A single-row summary table of statistics.
+    """
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in DataFrame.")
+
+    col_data = df[column]
+    col_dtype = col_data.dtype
+    result = {}
+
+    # Detect numeric or categorical type
+    is_numeric = pd.api.types.is_numeric_dtype(col_data)
+
+    if is_numeric:
+        result["type"] = "numeric"
+        result["count"] = col_data.count()
+        result["missing_count"] = col_data.isna().sum()
+        result["num_unique"] = col_data.nunique(dropna=True)
+        result["mean"] = col_data.mean()
+        result["std"] = col_data.std()
+        result["min"] = col_data.min()
+        result["1%"] = col_data.quantile(0.01)
+        result["25%"] = col_data.quantile(0.25)
+        result["50%"] = col_data.quantile(0.50)
+        result["75%"] = col_data.quantile(0.75)
+        result["99%"] = col_data.quantile(0.99)
+        result["max"] = col_data.max()
+        result["skewness"] = col_data.skew()
+        result["kurtosis"] = col_data.kurtosis()
+        result["IQR"] = result["75%"] - result["25%"]
+
+        if plot:
+            unique_vals = col_data.nunique()
+            plt.figure(figsize=(8, 4))
+            if unique_vals > 10:
+                sns.histplot(col_data.dropna(), bins=10, kde=True)
+                plt.title(f"Histogram of '{column}'")
+            else:
+                sns.countplot(x=col_data.dropna(), order=col_data.value_counts().index)
+                plt.title(f"Bar Plot of '{column}' (Discrete)")
+            plt.xlabel(column)
+            plt.ylabel("Frequency")
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.show()
+
+    else:
+        result["type"] = "categorical"
+        result["count"] = col_data.count()
+        result["missing_count"] = col_data.isna().sum()
+        result["num_unique"] = col_data.nunique(dropna=True)
+        mode = col_data.mode(dropna=True)
+        if not mode.empty:
+            result["mode"] = mode[0]
+            mode_freq = col_data.value_counts(dropna=True).iloc[0]
+            result["mode_freq"] = mode_freq
+            result["mode_percent"] = round((mode_freq / col_data.count()) * 100, 2)
+        else:
+            result["mode"] = result["mode_freq"] = result["mode_percent"] = np.nan
+        result["min"] = col_data.min()
+        result["max"] = col_data.max()
+
+        # Top 5 values (optional breakdown)
+        top_5 = col_data.value_counts(dropna=True).head(5).to_dict()
+        for i, (val, freq) in enumerate(top_5.items(), 1):
+            result[f"top_{i}_value"] = val
+            result[f"top_{i}_count"] = freq
+
+        if plot:
+            plt.figure(figsize=(8, 4))
+            sns.countplot(y=col_data, order=col_data.value_counts().index[:10])
+            plt.title(f"Top 10 Value Counts for '{column}'")
+            plt.xlabel("Frequency")
+            plt.ylabel(column)
+            plt.tight_layout()
+            plt.show()
+
+    return pd.DataFrame([result])
