@@ -1,0 +1,192 @@
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.stats import entropy
+
+def _interpret_cv(cv):
+    """Provides a qualitative interpretation of the Coefficient of Variation."""
+    if pd.isna(cv):
+        return "N/A"
+    if cv < 0.1:
+        return "Low variability"
+    elif cv < 0.3:
+        return "Moderate variability"
+    else:
+        return "High variability"
+
+def _interpret_entropy(h, num_unique):
+    """Provides a qualitative interpretation of Shannon Entropy."""
+    if pd.isna(h) or num_unique <= 1:
+        return "No diversity"
+    max_entropy = np.log2(num_unique)
+    if max_entropy == 0:
+        return "No diversity"
+    normalized_entropy = h / max_entropy
+    if normalized_entropy < 0.3:
+        return "Low diversity"
+    elif normalized_entropy < 0.7:
+        return "Moderate diversity"
+    else:
+        return "High diversity"
+
+def univariate_analysis(df, column, plot=True, bins=10, use_dynamic_bins=False, show_both_bins=False):
+    """
+    Performs a detailed univariate analysis of a column in a DataFrame.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame.
+        column (str): Column name to analyze.
+        plot (bool): Whether to show a plot.
+        bins (int): Default number of bins for histograms.
+        use_dynamic_bins (bool): If True, exclusively uses Freedman-Diaconis bins.
+        show_both_bins (bool): If True, overlays dynamic bins on the default histogram.
+
+    Returns:
+        pd.DataFrame: A single-row summary table of statistics.
+    """
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in DataFrame.")
+
+    col_data = df[column]
+    col_dtype = col_data.dtype
+    result = {"column_name": column}
+
+    is_numeric = pd.api.types.is_numeric_dtype(col_data)
+
+    if is_numeric:
+        result["type"] = "numeric"
+        result["memory_usage_kb"] = round(col_data.memory_usage(deep=True) / 1024, 2)
+        result["count"] = col_data.count()
+        result["missing_count"] = col_data.isna().sum()
+        result["zero_count"] = (col_data == 0).sum()
+        result["negative_count"] = (col_data < 0).sum()
+        result["num_unique"] = col_data.nunique(dropna=True)
+        
+        # Core stats
+        mean_val = col_data.mean()
+        std_val = col_data.std()
+        q1 = col_data.quantile(0.25)
+        q3 = col_data.quantile(0.75)
+        iqr = q3 - q1
+        
+        # FIXED: Better handling of CV calculation
+        cv = std_val / mean_val if abs(mean_val) > 1e-10 else np.nan
+
+        result["mean"] = mean_val
+        result["std"] = std_val
+        result["min"] = col_data.min()
+        result["25% (Q1)"] = q1
+        result["50% (Median)"] = col_data.quantile(0.50)
+        result["75% (Q3)"] = q3
+        result["max"] = col_data.max()
+        result["skewness"] = col_data.skew()
+        result["kurtosis"] = col_data.kurtosis()
+        
+        # Enhanced stats
+        result["IQR"] = iqr
+        result["CV"] = cv
+        result["CV_interpretation"] = _interpret_cv(cv)
+        
+        # Outlier detection
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        outliers = col_data[(col_data < lower_bound) | (col_data > upper_bound)]
+        result["outlier_count"] = len(outliers)
+        result["outlier_percent"] = round((len(outliers) / result["count"]) * 100, 2) if result["count"] > 0 else 0
+
+        if plot:
+            plt.figure(figsize=(10, 5))
+            if col_data.nunique() > 10:
+                # IMPROVED: Better bin calculation with edge case handling
+                data_range = col_data.max() - col_data.min()
+                if iqr > 0 and data_range > 0:
+                    bin_width = 2 * iqr / (result["count"] ** (1/3))
+                    dynamic_bins = max(1, int(np.ceil(data_range / bin_width)))
+                else:
+                    dynamic_bins = bins  # Fallback for edge cases
+
+                title = f"Histogram of '{column}'"
+                
+                if use_dynamic_bins:
+                    sns.histplot(col_data.dropna(), bins=dynamic_bins, kde=True)
+                    title += f" (Dynamic Bins: {dynamic_bins})"
+                elif show_both_bins:
+                    # IMPROVED: Better visualization for comparing bins
+                    plt.hist(col_data.dropna(), bins=bins, alpha=0.7, label=f'Default Bins ({bins})', color='blue')
+                    plt.hist(col_data.dropna(), bins=dynamic_bins, alpha=0.5, label=f'Dynamic Bins ({dynamic_bins})', color='red')
+                    plt.legend()
+                    title += f" (Comparing Bins)"
+                    plt.ylabel("Frequency")
+                else:
+                    sns.histplot(col_data.dropna(), bins=bins, kde=True)
+                
+                plt.title(title)
+                plt.xlabel(column)
+                # FIXED: Only rotate labels when necessary
+                if len(str(col_data.min())) + len(str(col_data.max())) > 20:
+                    plt.xticks(rotation=45)
+
+            else:
+                sns.countplot(x=col_data.dropna(), order=col_data.value_counts().index)
+                plt.title(f"Bar Plot of '{column}' (Discrete Numeric)")
+                plt.xlabel(column)
+            
+            plt.ylabel("Frequency")
+            plt.tight_layout()
+            plt.show()
+
+    else:
+        result["type"] = "categorical"
+        result["memory_usage_kb"] = round(col_data.memory_usage(deep=True) / 1024, 2)
+        result["count"] = col_data.count()
+        result["missing_count"] = col_data.isna().sum()
+        num_unique = col_data.nunique(dropna=True)
+        result["num_unique"] = num_unique
+        
+        counts = col_data.value_counts(dropna=True)
+        
+        if not counts.empty:
+            # Mode
+            result["mode"] = counts.index[0]
+            result["mode_freq"] = int(counts.iloc[0])
+            result["mode_percent"] = round((counts.iloc[0] / result["count"]) * 100, 2)
+            
+            # 2nd Mode
+            if len(counts) > 1:
+                result["2nd_mode"] = counts.index[1]
+                result["2nd_mode_freq"] = int(counts.iloc[1])
+                result["2nd_mode_percent"] = round((counts.iloc[1] / result["count"]) * 100, 2)
+            else:
+                # ADDED: Handle case with only one unique value
+                result["2nd_mode"] = None
+                result["2nd_mode_freq"] = 0
+                result["2nd_mode_percent"] = 0.0
+            
+            # Entropy calculation
+            probs = counts / result["count"]
+            h = entropy(probs, base=2)
+            result["shannon_entropy"] = h
+            result["entropy_interpretation"] = _interpret_entropy(h, num_unique)
+        else:
+            # ADDED: Handle empty data case
+            result["mode"] = None
+            result["mode_freq"] = 0
+            result["mode_percent"] = 0.0
+            result["2nd_mode"] = None
+            result["2nd_mode_freq"] = 0
+            result["2nd_mode_percent"] = 0.0
+            result["shannon_entropy"] = np.nan
+            result["entropy_interpretation"] = "No diversity"
+        
+        if plot and not counts.empty:
+            plt.figure(figsize=(8, 5))
+            top_n = min(10, num_unique)
+            sns.countplot(y=col_data, order=counts.index[:top_n])
+            plt.title(f"Top {top_n} Value Counts for '{column}'")
+            plt.xlabel("Frequency")
+            plt.ylabel(column)
+            plt.tight_layout()
+            plt.show()
+
+    return pd.DataFrame([result])
