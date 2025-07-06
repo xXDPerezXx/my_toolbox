@@ -1,0 +1,42 @@
+def dynamic_function_tester(func, test_cases, verbose=True):
+    import pandas as pd
+
+    results = []
+
+    for i, (args, expected) in enumerate(test_cases):
+        try:
+            result = func(*args) if isinstance(args, tuple) else func(args)
+            passed = result == expected
+            status = "✅ Passed" if passed else "❌ Failed"
+            detail = "" if passed else f"Expected: {expected}, Got: {result}"
+        except Exception as e:
+            status = "💥 Error"
+            detail = str(e)
+
+        results.append({
+            "Test Case": f"{func.__name__}({args})",
+            "Status": status,
+            "Details": detail
+        })
+
+    df = pd.DataFrame(results)
+    if verbose:
+        from IPython.display import display, Markdown
+        display(Markdown(f"### 🧪 Test Summary for `{func.__name__}`"))
+        display(df.style.applymap(
+            lambda x: 'color: green' if 'Passed' in x else 'color: red' if 'Failed' in x else 'color: orange',
+            subset=["Status"]
+        ))
+    # return df
+
+def add(x, y):
+    return x + y
+
+test_cases = [
+    ((1, 2), 3),
+    ((-1, 5), 4),
+    ((0, 0), 0),
+    ((2, 2), 5)  # This one will fail
+]
+
+dynamic_function_tester(add, test_cases)
