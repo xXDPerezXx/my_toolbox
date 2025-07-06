@@ -1,0 +1,90 @@
+from IPython.core.magic import register_line_magic
+import pandas as pd
+from IPython.display import display, Markdown
+
+@register_line_magic
+def test_func(line):
+  
+  '''
+  # Usage Example:
+  
+  def multiply(x, y):
+    return x * y
+  
+  multiply_test_cases = [
+      ((2, 3), 6),
+      ((0, 5), 0),
+      ((-1, 5), -5),
+      ((10, 0), 0),
+      ((3, 3), 9),
+  ]
+  
+  # How to run:
+  %test_func multiply
+  '''
+    import __main__
+    
+    # Parse the function name from the line
+    func_name = line.strip()
+    func = getattr(__main__, func_name, None)
+
+    if func is None:
+        print(f"❌ Function '{func_name}' not found.")
+        return
+
+    # Try to get test cases
+    test_case_name = f"{func_name}_test_cases"
+    test_cases = getattr(__main__, test_case_name, None)
+
+    if not test_cases:
+        print(f"❌ No test cases found. Please define `{test_case_name}` as a list of (args, expected).")
+        return
+
+    # Run the tests
+    results = []
+    for args, expected in test_cases:
+        try:
+            result = func(*args) if isinstance(args, tuple) else func(args)
+            passed = result == expected
+            status = "✅ Passed" if passed else "❌ Failed"
+            detail = "" if passed else f"Expected: {expected}, Got: {result}"
+        except Exception as e:
+            status = "💥 Error"
+            detail = str(e)
+
+        results.append({
+            "Test Case": f"{func.__name__}({args})",
+            "Status": status,
+            "Details": detail
+        })
+
+    df = pd.DataFrame(results)
+    display(Markdown(f"### 🧪 Test Summary for `{func_name}`"))
+    display(df.style.applymap(
+        lambda x: 'color: green' if 'Passed' in x else 'color: red' if 'Failed' in x else 'color: orange',
+        subset=["Status"]
+    ))
+
+    # # we dont need this portion bc all it will do is print the 'df' twice
+    # return df
+
+    # # use this if you want to also output the 'df' into a .csv
+    # # consider adding this as a parameter to toggle on/off
+    # df.to_csv("results.csv", index=False)
+
+	
+# Usage Example:
+
+def multiply(x, y):
+  return x * y
+
+multiply_test_cases = [
+    ((2, 3), 6),
+    ((0, 5), 0),
+    ((-1, 5), -5),
+    ((10, 0), 0),
+    ((3, 3), 9),
+]
+
+# How to run:
+%test_func multiply
