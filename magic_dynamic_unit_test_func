@@ -71,20 +71,3 @@ def test_func(line):
     # # use this if you want to also output the 'df' into a .csv
     # # consider adding this as a parameter to toggle on/off
     # df.to_csv("results.csv", index=False)
-
-	
-# Usage Example:
-
-def multiply(x, y):
-  return x * y
-
-multiply_test_cases = [
-    ((2, 3), 6),
-    ((0, 5), 0),
-    ((-1, 5), -5),
-    ((10, 0), 0),
-    ((3, 3), 9),
-]
-
-# How to run:
-%test_func multiply
