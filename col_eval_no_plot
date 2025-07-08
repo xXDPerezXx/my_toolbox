@@ -1,0 +1,168 @@
+# Evaluating one column, no plotting, just insights
+# Enhanced version of evaluate_column with better readability and insight
+import pandas as pd
+import numpy as np
+import re
+from typing import List, Dict, Any
+from scipy.stats import skew, kurtosis, entropy as scipy_entropy
+from collections import Counter
+import math
+
+
+def evaluate_column_readable(df: pd.DataFrame, column_name: str, top_n: int = 5) -> pd.DataFrame:
+    if column_name not in df.columns:
+        raise ValueError(f"Column '{column_name}' not found in DataFrame.")
+
+    col = df[column_name]
+    total = len(df)
+    non_null = col.dropna()
+    missing_pct = (total - non_null.count()) / total * 100 if total > 0 else 0
+    unique = non_null.nunique()
+    unique_pct = unique / non_null.count() * 100 if non_null.count() > 0 else 0
+    memory_usage = col.memory_usage(deep=True) / (1024 ** 2)
+
+    # Inferred type
+    inferred_type, confidence = _infer_type(col)
+
+    # Quality assessment
+    quality_score, quality_issues = _quality_issues(col)
+
+    # Pattern detection (always populate)
+    patterns = _detect_patterns_readable(col, inferred_type)
+
+    # Distribution summary
+    distribution = _distribution_summary(col, total, top_n)
+
+    # Summary stats
+    stats_dict, stats_str = _summary_stats(col, inferred_type)
+
+    # Insights
+    insights = _generate_readable_insights(col, inferred_type, quality_score, quality_issues, patterns, stats_dict)
+
+    # Format final output for readability
+    return pd.DataFrame([{
+        "Column_Name": column_name,
+        "Data_Quality_Score": f"{quality_score}/100",
+        "Quality_Issues": "; ".join(quality_issues) if quality_issues else "None detected.",
+        "Patterns_Detected": "; ".join(patterns) if patterns else "No notable patterns detected.",
+        "Distribution_Analysis": distribution,
+        "Summary_Statistics": stats_str,
+        "Memory_Usage_MB": round(memory_usage, 4),
+        "Insights_And_Recommendations": "; ".join(insights) if insights else "No specific recommendations."
+    }])
+
+
+def _summary_stats(col: pd.Series, inferred_type: str) -> tuple[dict, str]:
+    non_null = col.dropna()
+    stats = {
+        "total_count": len(col),
+        "non_null_count": non_null.count(),
+        "null_count": col.isna().sum(),
+        "unique_count": non_null.nunique(),
+        "unique_pct": (non_null.nunique() / non_null.count() * 100) if non_null.count() > 0 else 0.0,
+        "negative_count": (non_null < 0).sum() if pd.api.types.is_numeric_dtype(non_null) else 'N/A'
+    }
+
+    summary = [
+        f"Total: {stats['total_count']}",
+        f"Non-null: {stats['non_null_count']}",
+        f"Null: {stats['null_count']}",
+        f"Unique: {stats['unique_count']} ({stats['unique_pct']:.1f}%)",
+        f"Negative Values: {stats['negative_count']}"
+    ]
+
+    if inferred_type in ["float", "integer"] and len(non_null) > 1:
+        desc = non_null.describe()
+        stats.update({
+            "min": desc["min"],
+            "max": desc["max"],
+            "mean": desc["mean"],
+            "std": desc["std"],
+            "skewness": skew(non_null),
+            "kurtosis": kurtosis(non_null)
+        })
+
+        skew_val = stats['skewness']
+        kurt_val = stats['kurtosis']
+        if abs(skew_val) < 0.5:
+            skew_note = "approximately symmetric"
+        elif skew_val > 0:
+            skew_note = "right-skewed"
+        else:
+            skew_note = "left-skewed"
+
+        if kurt_val > 3:
+            kurt_note = "leptokurtic (heavy tails)"
+        elif kurt_val < 3:
+            kurt_note = "platykurtic (light tails)"
+        else:
+            kurt_note = "mesokurtic (normal-like)"
+
+        summary.extend([
+            f"Min: {desc['min']:.2f}",
+            f"Max: {desc['max']:.2f}",
+            f"Mean: {desc['mean']:.2f}",
+            f"Std: {desc['std']:.2f}",
+            f"Skewness: {skew_val:.2f} ({skew_note})",
+            f"Kurtosis: {kurt_val:.2f} ({kurt_note})"
+        ])
+        stats['skew_note'] = skew_note
+        stats['kurt_note'] = kurt_note
+
+    return stats, "; ".join(summary)
+
+
+def _generate_readable_insights(col: pd.Series, inferred_type: str, score: int, issues: List[str], patterns: List[str], stats: dict) -> List[str]:
+    insights = []
+    non_null = col.dropna()
+
+    entropy_val = _calculate_entropy(col)
+    unique_pct = stats.get("unique_pct", 0)
+
+    if score < 70:
+        insights.append("Low data quality. Significant cleaning recommended.")
+    elif score < 90:
+        insights.append("Moderate data quality. Some improvements may help.")
+    else:
+        insights.append("High data quality. Minimal issues detected.")
+
+    if inferred_type == "date_string":
+        insights.append("Column may benefit from conversion to datetime format.")
+
+    if inferred_type == "text" and col.nunique() > 100:
+        insights.append("Text column has high cardinality. Consider summarization or vectorization.")
+
+    if inferred_type == "categorical" and col.nunique() > 50:
+        insights.append("High number of categories. Consider combining infrequent ones.")
+
+    # Use datatype-aware uniqueness evaluation
+    if inferred_type in ["integer", "float"]:
+        if col.nunique() > 100:
+            insights.append("High uniqueness — likely a continuous numeric field.")
+    else:
+        if unique_pct > 95:
+            insights.append("Over 95% of values are unique — likely an identifier or token.")
+        elif unique_pct < 5:
+            insights.append("Low uniqueness — likely a label, flag, or categorical variable.")
+
+    if inferred_type == "float":
+        min_val, max_val = non_null.min(), non_null.max()
+        if min_val >= 0 and max_val <= 1:
+            insights.append("Numeric values bounded between 0 and 1 — may represent proportions or probabilities.")
+
+    if "email" in "".join(patterns).lower():
+        insights.append("Field may contain email addresses. Review for potential PII exposure.")
+
+    if entropy_val < 1:
+        insights.append("Low entropy — values are highly repetitive.")
+    elif entropy_val > 4:
+        insights.append("High entropy — likely a hashed field, UUID, or random token.")
+    else:
+        insights.append(f"Entropy level: {entropy_val} bits — moderate variability.")
+
+    if 'skew_note' in stats:
+        insights.append(f"Distribution is {stats['skew_note']}.")
+    if 'kurt_note' in stats:
+        insights.append(f"Tail shape is {stats['kurt_note']}.")
+
+    return insights
