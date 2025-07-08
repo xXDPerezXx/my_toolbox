@@ -111,6 +111,28 @@ def _summary_stats(col: pd.Series, inferred_type: str) -> tuple[dict, str]:
 
     return stats, "; ".join(summary)
 
+def _infer_type(col: pd.Series) -> tuple[str, float]:
+    non_null = col.dropna()
+    if len(non_null) == 0:
+        return "empty", 1.0
+    if pd.api.types.is_numeric_dtype(non_null):
+        return ("float" if pd.api.types.is_float_dtype(non_null) else "integer"), 0.95
+    if pd.api.types.is_datetime64_any_dtype(non_null):
+        return "datetime", 0.95
+    if pd.api.types.is_bool_dtype(non_null):
+        return "boolean", 1.0
+
+    sample = non_null.astype(str).sample(min(100, len(non_null)), random_state=1)
+    date_regexes = [r"\d{4}-\d{2}-\d{2}", r"\d{2}/\d{2}/\d{4}"]
+    if sample.str.contains('|'.join(date_regexes)).mean() > 0.6:
+        return "date_string", 0.85
+
+    avg_len = sample.str.len().mean()
+    if avg_len > 15:
+        return "text", 0.8
+    else:
+        return "categorical", 0.8
+
 
 def _generate_readable_insights(col: pd.Series, inferred_type: str, score: int, issues: List[str], patterns: List[str], stats: dict) -> List[str]:
     insights = []
@@ -166,3 +188,89 @@ def _generate_readable_insights(col: pd.Series, inferred_type: str, score: int, 
         insights.append(f"Tail shape is {stats['kurt_note']}.")
 
     return insights
+
+def _quality_issues(col: pd.Series) -> tuple[int, List[str]]:
+    issues = []
+    total = len(col)
+    non_null = col.dropna()
+    score = 100
+
+    missing_pct = (total - non_null.count()) / total * 100 if total > 0 else 0
+    if missing_pct > 50:
+        issues.append(f"Over 50% missing values ({missing_pct:.1f}%)")
+        score -= 30
+    elif missing_pct > 20:
+        issues.append(f"Moderate missing values ({missing_pct:.1f}%)")
+        score -= 15
+    elif missing_pct > 5:
+        issues.append(f"Some missing values ({missing_pct:.1f}%)")
+        score -= 5
+
+    if non_null.count() > 0:
+        dup_pct = (non_null.count() - non_null.nunique()) / non_null.count() * 100
+        if dup_pct > 90:
+            issues.append(f"Very high duplication ({dup_pct:.1f}%)")
+            score -= 20
+        elif dup_pct > 50:
+            issues.append(f"High duplication ({dup_pct:.1f}%)")
+            score -= 10
+
+    if pd.api.types.is_numeric_dtype(col):
+        q1 = non_null.quantile(0.25)
+        q3 = non_null.quantile(0.75)
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        outliers = non_null[(non_null < lower) | (non_null > upper)]
+        if len(non_null) > 0:
+            out_pct = len(outliers) / len(non_null) * 100
+            if out_pct > 10:
+                issues.append(f"Outliers present in {out_pct:.1f}% of values")
+                score -= 10
+
+    return max(score, 0), issues
+
+def _detect_patterns_readable(col: pd.Series, inferred_type: str) -> List[str]:
+    patterns = []
+    non_null = col.dropna().astype(str)
+    sample = non_null.sample(min(100, len(non_null)), random_state=1)
+
+    if inferred_type in ["text", "categorical", "date_string"]:
+        email_re = r"[\w.-]+@[\w.-]+\.\w+"
+        phone_re = r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
+        url_re = r"https?://[\w./-]+"
+
+        if sample.str.contains(email_re).mean() > 0.3:
+            patterns.append("Contains email-like strings")
+        if sample.str.contains(phone_re).mean() > 0.3:
+            patterns.append("Phone number format observed")
+        if sample.str.contains(url_re).mean() > 0.2:
+            patterns.append("Likely contains URLs")
+
+        len_std = sample.str.len().std()
+        if len_std < 2:
+            patterns.append("Mostly fixed-length strings")
+        elif len_std < 5:
+            patterns.append("Slight variation in string length")
+        else:
+            patterns.append("High variation in string length")
+
+        pattern_clusters = sample.apply(lambda x: re.sub(r"[A-Z]+", "A", re.sub(r"[a-z]+", "a", re.sub(r"\d", "9", x))))
+        top_patterns = pattern_clusters.value_counts().head(3)
+        for pat in top_patterns.index:
+            patterns.append(f"Frequent pattern: {pat} ({top_patterns[pat]} samples)")
+
+    return patterns
+
+def _distribution_summary(col: pd.Series, total: int, top_n: int) -> str:
+    counts = col.value_counts(dropna=True).head(top_n)
+    summary = []
+    for val, count in counts.items():
+        pct = count / total * 100
+        summary.append(f"'{val}' - {count} ({pct:.1f}%)")
+    return "; ".join(summary) if summary else "No values to summarize."
+
+def _calculate_entropy(col: pd.Series) -> float:
+    non_null = col.dropna().astype(str)
+    freqs = non_null.value_counts(normalize=True)
+    return round(scipy_entropy(freqs, base=2), 2) if not freqs.empty else 0.0
