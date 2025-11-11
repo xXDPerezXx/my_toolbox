@@ -1,0 +1,742 @@
+import pandas as pd
+import numpy as np
+import math
+import re
+from typing import Optional, Dict, Any
+from collections import Counter
+from datetime import timedelta
+import openpyxl
+from openpyxl.utils import get_column_letter
+import warnings
+import os
+
+# Avoid requiring scipy for portability; use pandas/numpy functions for skew/kurtosis where possible.
+# If scipy is available, the code uses it for entropy numeric stability; otherwise fallback to numpy-based.
+try:
+    from scipy.stats import entropy as scipy_entropy
+    SCIPY_AVAILABLE = True
+except Exception:
+    SCIPY_AVAILABLE = False
+
+########################################################################
+# Helper formatting functions
+########################################################################
+
+def _fmt_int(x: int) -> str:
+    if pd.isna(x):
+        return "NaN"
+    return f"{int(x):,}"
+
+def _fmt_float(x: float, decimals: int = 3) -> str:
+    if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+        return "NaN"
+    fmt = "{:,.{d}f}".format
+    return fmt(x, d=decimals)
+
+def _fmt_pct(x: float, decimals: int = 3) -> str:
+    if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+        return "NaN"
+    return f"{x*100:.{decimals}f}%"
+
+def _safe_div(a, b):
+    try:
+        return a / b
+    except Exception:
+        return np.nan
+
+def _calc_entropy_from_counts(counts):
+    """
+    Calculate Shannon entropy in bits from counts.
+    Uses scipy if available for numerical stability; otherwise uses numpy.
+    """
+    counts = np.asarray(counts, dtype=float)
+    total = counts.sum()
+    if total <= 0:
+        return 0.0
+    probs = counts / total
+    probs = probs[probs > 0]
+    if len(probs) == 0:
+        return 0.0
+    if SCIPY_AVAILABLE:
+        # scipy_entropy default is natural log -> convert to base-2
+        return float(scipy_entropy(probs, base=2))
+    else:
+        # using numpy log2
+        return float(-(probs * np.log2(probs)).sum())
+
+def _clean_sheet_name(name: str, max_len: int = 31) -> str:
+    # Remove invalid characters: : \ / ? * [ ]
+    cleaned = re.sub(r'[:\\\/\?\*\[\]]', '_', str(name))
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len]
+    return cleaned
+
+########################################################################
+# Main analysis function
+########################################################################
+
+def analyze_univariate(
+    df: pd.DataFrame,
+    top_k: int = 25,
+    mode: str = "full",
+    detect_datetime_threshold: float = 0.80,
+    detect_numeric_threshold: float = 0.90,
+    zero_pad_detection_threshold: float = 0.90,
+    cardinality_medium_pct: float = 0.05,
+    id_like_unique_ratio: float = 0.99,
+    mostly_null_threshold: float = 0.70,
+    dominant_value_threshold: float = 0.90,
+    uniform_entropy_ratio_threshold: float = 0.95,
+    rounded_values_pct: float = 0.80,
+    binary_tolerance_pct: float = 1.0,
+    sparse_threshold: float = 0.80,
+    detect_zero_padding_min_length: int = 2,
+    format_numeric_decimals: int = 3,
+    format_percent_decimals: int = 3,
+    verbose: bool = True,
+    progress_print_every: int = 50,
+) -> pd.DataFrame:
+    """
+    analyze_univariate
+    ------------------
+    Perform a thorough, configurable univariate analysis on a pandas DataFrame.
+    Returns a pandas DataFrame with one row per input column and the following columns:
+      - column_name
+      - dtype_detected
+      - distribution_count
+      - distribution_percentage
+      - column_stats
+      - insights
+      - insights_explanation
+
+    Important design choices:
+    - The function performs no file I/O. It returns the analysis DataFrame only.
+    - Excel writing is intentionally separate (see append_analysis_to_excel()).
+    - Two modes are supported:
+        * mode='full'  -> compute everything (entropy, skewness, kurtosis, tokenization, patterns).
+        * mode='fast'  -> skip expensive metrics (no deep tokenization, limited entropy/skew computations).
+      Use 'fast' for quick scans on very wide or very large tables.
+
+    Parameters (high-level):
+    - df: pandas.DataFrame
+        The DataFrame to analyze (you provide this; function expects it already loaded into memory).
+    - top_k: int (default=25)
+        Number of top unique values to include in distribution_count / distribution_percentage.
+        Remaining unique values are aggregated into "OTHER".
+    - mode: str, "full" or "fast"
+        Depth of analysis. See above for differences.
+    - detect_datetime_threshold: float (0-1, default=0.80)
+        If >= detect_datetime_threshold fraction of non-null values in an object column parse to a datetime,
+        the column will be treated as datetime and datetime-specific stats will be computed.
+    - detect_numeric_threshold: float (0-1, default=0.90)
+        If >= detect_numeric_threshold fraction of non-null values in an object column coerce to numeric
+        (without NaN after coercion), the column will be treated as numeric.
+    - zero_pad_detection_threshold: float (0-1, default=0.90)
+        Fraction of non-null values that must show zero-padding (leading zeros with same length) to flag zero-padding.
+    - detect_zero_padding_min_length: int (default=2)
+        Minimum length of string to consider for zero-padding detection (ignore single-char strings).
+    - cardinality_medium_pct: float (0-1, default=0.05)
+        Cutoff to label 'medium' vs 'high' cardinality: if n_unique / n_nonnull > cardinality_medium_pct -> high.
+    - id_like_unique_ratio: float (0-1, default=0.99)
+        If fraction of unique non-null values >= this ratio, column will be strong candidate for id_like.
+    - mostly_null_threshold: float (0-1, default=0.70)
+        If fraction null >= mostly_null_threshold, `mostly_null` insight flag is set.
+    - dominant_value_threshold: float (0-1, default=0.90)
+        If top value fraction >= this, `dominant_value` insight flag is set.
+    - uniform_entropy_ratio_threshold: float (0-1, default=0.95)
+        To detect `uniform_distribution`, we compute entropy / max_entropy (log2(n_unique)).
+        If ratio >= uniform_entropy_ratio_threshold, values are near-uniform.
+    - rounded_values_pct: float (0-1, default=0.80)
+        For numeric columns, if >= this fraction of values have zero fractional part (or fixed decimals),
+        tag as `rounded_values`.
+    - binary_tolerance_pct: float (0-1, default=1.0)
+        For `binary_flag`, require that the unique count of non-null values is 2 and those two values cover at least
+        binary_tolerance_pct fraction of non-null rows (set <1.0 to tolerate noise).
+    - sparse_threshold: float (0-1, default=0.80)
+        Additional threshold used to tag `sparse` when > sparse_threshold nulls OR a single dominant value >= 0.9.
+    - format_numeric_decimals: int (default=3)
+        Decimal places for numeric formatting in output strings.
+    - format_percent_decimals: int (default=3)
+        Decimal places for percent formatting in output strings.
+    - verbose: bool (default=True)
+        If True, print lightweight progress logs.
+    - progress_print_every: int (default=50)
+        Print a progress line every X columns (when verbose=True).
+
+    Output columns (order):
+      1. column_name
+      2. dtype_detected
+      3. distribution_count
+      4. distribution_percentage
+      5. column_stats
+      6. insights
+      7. insights_explanation
+
+    Insight-tag logic (explicit rules)
+    ----------------------------------
+    - constant_value:
+        Rule: n_unique == 1
+        Meaning: Column has the same value for all rows.
+    - dominant_value:
+        Rule: top1_count / n_nonnull >= dominant_value_threshold
+        Meaning: A single value dominates the column (low variability).
+    - mostly_null:
+        Rule: n_null / total_count >= mostly_null_threshold
+        Meaning: Column is mostly missing.
+    - binary_flag:
+        Rule: number of distinct non-null values == 2 and coverage >= binary_tolerance_pct
+        Meaning: Column is binary-like (0/1, True/False, Y/N).
+    - low_cardinality:
+        Rule: n_unique <= 50
+        Meaning: Column behaves like a category.
+    - high_cardinality:
+        Rule: (n_unique / n_nonnull) > cardinality_medium_pct
+        Meaning: Column has many distinct values relative to rows.
+    - id_like:
+        Rule: (n_unique / n_nonnull) >= id_like_unique_ratio
+        Meaning: Likely an identifier: mostly unique per-row values.
+    - rounded_values:
+        Rule: For numeric dtype, fraction of values with fractional part ~ 0 >= rounded_values_pct
+        Meaning: Values appear rounded or discretized.
+    - has_outliers:
+        Rule: Using IQR rule: count of values beyond Q3+1.5*IQR or below Q1-1.5*IQR > 0 (optionally >1%)
+        Meaning: Outliers detected by IQR rule (inspect row-level values).
+    - highly_skewed:
+        Rule: |skewness| > 1
+        Meaning: Distribution strongly skewed.
+    - uniform_distribution:
+        Rule: entropy / log2(n_unique) >= uniform_entropy_ratio_threshold
+        Meaning: Frequencies approach uniform; no single dominant category.
+    - text_structured:
+        Rule: Regex matches (email, url, phone) exceed small absolute & relative thresholds.
+        Meaning: Column contains structured text (emails, urls, phones).
+    - text_freeform:
+        Rule: High token entropy + variable lengths
+        Meaning: Likely free text (comments, descriptions).
+    - zero_padding:
+        Rule: For string columns, >= zero_pad_detection_threshold of non-null strings have same length and start with '0'.
+        Meaning: Likely codes that should preserve leading zeros (e.g., zip codes).
+    - sparse:
+        Rule: n_null / total_count >= sparse_threshold OR top1_pct >= 0.9
+        Meaning: Column is sparse or dominated by one value.
+
+    Notes:
+    - All thresholds above are configurable via function parameters.
+    - The function composes `column_stats` as a single-line semicolon-separated key=value string,
+      beginning with total counts and nulls, then dtype-specific details, then memory usage and flags.
+    - `insights_explanation` includes full sentences for each insight, separated by a pipe character (`|`).
+
+    Returns:
+      pandas.DataFrame with one row per analyzed column and the columns listed above.
+
+    Example usage:
+    >>> summary_df = analyze_univariate(df, top_k=25, mode='full', verbose=True)
+    >>> summary_df.head()
+    """
+
+    if mode not in {"full", "fast"}:
+        raise ValueError("mode must be 'full' or 'fast'")
+
+    # Pre-compute constants
+    total_rows = len(df)
+    results = []
+
+    # iterate columns
+    cols = list(df.columns)
+    ncols = len(cols)
+    for idx, col in enumerate(cols, start=1):
+        if verbose and (idx % progress_print_every == 0 or idx == 1 or idx == ncols):
+            print(f"[{idx}/{ncols}] Analyzing column: {col}")
+
+        s = df[col]
+        col_nonnull = s.dropna()
+        n_nonnull = int(col_nonnull.shape[0])
+        n_null = total_rows - n_nonnull
+        pct_null = _safe_div(n_null, total_rows)
+        # default dtype label
+        dtype_detected = None
+
+        # Attempt datetime detection for object types
+        is_datetime = False
+        coerced_dt = None
+        if s.dtype.kind in ('M',):  # already datetime64
+            is_datetime = True
+            dtype_detected = "datetime"
+            coerced_dt = pd.to_datetime(s, errors='coerce')
+        else:
+            # try detection if object or ambiguous
+            if s.dtype == object or pd.api.types.is_string_dtype(s):
+                # try parse sample if not full scan (we do full parse but can short-circuit using sample)
+                if n_nonnull > 0:
+                    # try to coerce to datetime
+                    parsed = pd.to_datetime(s, errors='coerce')
+                    n_parsed = parsed.notna().sum()
+                    if n_parsed / max(1, n_nonnull) >= detect_datetime_threshold:
+                        is_datetime = True
+                        dtype_detected = "datetime"
+                        coerced_dt = parsed
+
+        # Numeric detection/coercion
+        is_numeric = False
+        coerced_num = None
+        if pd.api.types.is_numeric_dtype(s):
+            is_numeric = True
+            dtype_detected = dtype_detected or str(s.dtype)
+            coerced_num = s.astype(float)
+        else:
+            # try to coerce object -> numeric if many values are numeric-like
+            if s.dtype == object or pd.api.types.is_string_dtype(s):
+                coerced = pd.to_numeric(s, errors='coerce')
+                n_coerced = coerced.notna().sum()
+                if n_coerced / max(1, n_nonnull) >= detect_numeric_threshold:
+                    is_numeric = True
+                    dtype_detected = dtype_detected or "numeric"
+                    coerced_num = coerced
+
+        # If previously recognized as datetime, prefer that
+        if is_datetime:
+            dtype_detected = "datetime"
+        elif is_numeric:
+            dtype_detected = "numeric"
+        else:
+            # fallback types
+            if pd.api.types.is_bool_dtype(s):
+                dtype_detected = "boolean"
+            elif pd.api.types.is_integer_dtype(s):
+                dtype_detected = dtype_detected or "integer"
+            else:
+                dtype_detected = dtype_detected or "text"
+
+        # Basic counts
+        try:
+            value_counts = col_nonnull.value_counts(dropna=True)
+        except Exception:
+            # fallback: convert to string then count
+            value_counts = col_nonnull.astype(str).value_counts(dropna=True)
+
+        n_unique = int(value_counts.shape[0])
+        pct_unique = _safe_div(n_unique, max(1, n_nonnull))
+
+        # Top-k distribution handling (top_k provided by user)
+        # Always show up to top_k values; aggregate the rest into OTHER
+        top_k_local = max(1, int(top_k))
+        top_counts = value_counts.iloc[:top_k_local]
+        other_count = value_counts.iloc[top_k_local:].sum() if n_unique > top_k_local else 0
+
+        # distribution strings
+        dist_count_items = []
+        dist_pct_items = []
+        for val, cnt in top_counts.items():
+            pct = _safe_div(cnt, max(1, total_rows))
+            # format value as string (protect delimiters)
+            val_str = str(val)
+            dist_count_items.append(f"{val_str} - {_fmt_int(int(cnt))}")
+            dist_pct_items.append(f"{val_str} - {_fmt_pct(pct, format_percent_decimals)}")
+        if other_count > 0:
+            dist_count_items.append(f"OTHER - {_fmt_int(int(other_count))}")
+            dist_pct_items.append(f"OTHER - {_fmt_pct(_safe_div(other_count, total_rows), format_percent_decimals)}")
+
+        distribution_count = "; ".join(dist_count_items)
+        distribution_percentage = "; ".join(dist_pct_items)
+
+        # Compute entropy (if full mode or small cardinality)
+        entropy_bits = None
+        entropy_interpretation = ""
+        if mode == "full" or n_unique <= 5000:
+            if n_unique > 0:
+                entropy_bits = _calc_entropy_from_counts(value_counts.values)
+                # interpret entropy roughly:
+                max_entropy = math.log2(n_unique) if n_unique > 0 else 0.0
+                entropy_ratio = _safe_div(entropy_bits, max_entropy) if max_entropy > 0 else 0.0
+                if entropy_bits <= 1.0:
+                    entropy_interpretation = " (very low diversity)"
+                elif entropy_bits <= 3.0:
+                    entropy_interpretation = " (low diversity)"
+                elif entropy_bits <= 8.0:
+                    entropy_interpretation = " (moderate diversity)"
+                else:
+                    entropy_interpretation = " (high diversity)"
+            else:
+                entropy_bits = 0.0
+                entropy_interpretation = " (no diversity)"
+        else:
+            # In fast mode and large cardinality, skip expensive entropy
+            entropy_bits = None
+            entropy_interpretation = ""
+
+        # memory usage per-column (MB)
+        try:
+            memory_mb = s.memory_usage(deep=True) / (1024.0 ** 2)
+        except Exception:
+            memory_mb = np.nan
+
+        # Build column_stats parts (common group first)
+        cs_parts = []
+        cs_parts.append(f"total_count={_fmt_int(total_rows)}")
+        cs_parts.append(f"n_nonnull={_fmt_int(n_nonnull)} ({_fmt_pct(_safe_div(n_nonnull, total_rows), format_percent_decimals)})")
+        cs_parts.append(f"n_null={_fmt_int(n_null)} ({_fmt_pct(pct_null, format_percent_decimals)})")
+        cs_parts.append(f"n_unique={_fmt_int(n_unique)} ({_fmt_pct(pct_unique, format_percent_decimals)})")
+        # cardinality label
+        if n_unique <= 50:
+            cardinality_label = "low"
+        else:
+            cardinality_label = "high" if (pct_unique > cardinality_medium_pct) else "medium"
+        cs_parts.append(f"cardinality={cardinality_label}")
+        if entropy_bits is not None:
+            cs_parts.append(f"entropy={_fmt_float(entropy_bits, format_numeric_decimals)} bits{entropy_interpretation}")
+        cs_parts.append(f"memory_mb={_fmt_float(memory_mb, format_numeric_decimals)}")
+
+        insights = []
+        insights_explanations = []
+
+        # COMMON insights
+        if n_unique == 1:
+            insights.append("constant_value")
+            insights_explanations.append(f"constant_value: This column has a single unique value ({value_counts.index[0]}).")
+        # mostly_null
+        if pct_null >= mostly_null_threshold:
+            insights.append("mostly_null")
+            insights_explanations.append(
+                f"mostly_null: { _fmt_pct(pct_null, format_percent_decimals) } of rows are null; column is highly sparse."
+            )
+
+        # dominant value
+        top1_count = int(value_counts.iloc[0]) if n_unique > 0 else 0
+        top1_pct_nonnull = _safe_div(top1_count, max(1, n_nonnull)) if n_nonnull > 0 else 0.0
+        top1_pct_total = _safe_div(top1_count, max(1, total_rows))
+        if top1_pct_nonnull >= dominant_value_threshold:
+            insights.append("dominant_value")
+            val_display = str(value_counts.index[0])
+            insights_explanations.append(
+                f"dominant_value: The top value '{val_display}' covers {_fmt_pct(top1_pct_nonnull, format_percent_decimals)} of non-null rows."
+            )
+
+        # cardinality-based insights
+        if n_unique <= 50:
+            insights.append("low_cardinality")
+            insights_explanations.append("low_cardinality: Column has <= 50 unique values; treat as categorical candidate.")
+        if (pct_unique > cardinality_medium_pct):
+            insights.append("high_cardinality")
+            insights_explanations.append(
+                f"high_cardinality: Unique values represent {_fmt_pct(pct_unique, format_percent_decimals)} of non-null rows."
+            )
+
+        # id_like heuristic
+        if n_nonnull > 0 and (n_unique / n_nonnull) >= id_like_unique_ratio:
+            insights.append("id_like")
+            insights_explanations.append(
+                f"id_like: { _fmt_pct(_safe_div(n_unique, n_nonnull), format_percent_decimals) } unique ratio suggests identifier-like values."
+            )
+
+        # numeric-specific metrics and insights
+        if is_numeric and coerced_num is not None:
+            # compute stats
+            arr = coerced_num.dropna().astype(float)
+            if arr.shape[0] > 0:
+                mean = float(arr.mean())
+                median = float(arr.median())
+                std = float(arr.std(ddof=0))
+                q1 = float(arr.quantile(0.25))
+                q3 = float(arr.quantile(0.75))
+                iqr = q3 - q1
+                mn = float(arr.min())
+                mx = float(arr.max())
+                # skewness and kurtosis using pandas
+                skewness = float(arr.skew())
+                kurt = float(arr.kurt())
+                mad = float((arr - arr.median()).abs().median())
+                # outliers via IQR rule
+                lower = q1 - 1.5 * iqr
+                upper = q3 + 1.5 * iqr
+                outlier_mask = (arr < lower) | (arr > upper)
+                outlier_count = int(outlier_mask.sum())
+                outlier_pct = _safe_div(outlier_count, arr.shape[0])
+                # rounded detection
+                frac_part = (arr - np.floor(arr)).abs()
+                rounded_frac_pct = _safe_div((frac_part < 1e-9).sum(), arr.shape[0])
+                # compose stats
+                cs_parts.append(f"mean={_fmt_float(mean, format_numeric_decimals)}")
+                cs_parts.append(f"median={_fmt_float(median, format_numeric_decimals)}")
+                cs_parts.append(f"std={_fmt_float(std, format_numeric_decimals)}")
+                cs_parts.append(f"min={_fmt_float(mn, format_numeric_decimals)}")
+                cs_parts.append(f"q1={_fmt_float(q1, format_numeric_decimals)}")
+                cs_parts.append(f"q3={_fmt_float(q3, format_numeric_decimals)}")
+                cs_parts.append(f"iqr={_fmt_float(iqr, format_numeric_decimals)}")
+                cs_parts.append(f"max={_fmt_float(mx, format_numeric_decimals)}")
+                cs_parts.append(f"skewness={_fmt_float(skewness, format_numeric_decimals)}")
+                cs_parts.append(f"kurtosis={_fmt_float(kurt, format_numeric_decimals)}")
+                cs_parts.append(f"mad={_fmt_float(mad, format_numeric_decimals)}")
+                # numeric insights
+                if abs(skewness) > 1:
+                    insights.append("highly_skewed")
+                    insights_explanations.append(f"highly_skewed: Skewness = {_fmt_float(skewness, format_numeric_decimals)} indicates skewed distribution.")
+                if outlier_count > 0:
+                    insights.append("has_outliers")
+                    insights_explanations.append(f"has_outliers: { _fmt_int(outlier_count) } outliers detected ({ _fmt_pct(outlier_pct, format_percent_decimals) } of non-null).")
+                if rounded_frac_pct >= rounded_values_pct:
+                    insights.append("rounded_values")
+                    insights_explanations.append(f"rounded_values: {_fmt_pct(rounded_frac_pct, format_percent_decimals)} of values appear to be rounded to integers (no fractional part).")
+
+        # datetime-specific stats
+        if is_datetime and coerced_dt is not None:
+            dt = coerced_dt.dropna()
+            if dt.shape[0] > 0:
+                dt_min = dt.min()
+                dt_max = dt.max()
+                date_range_days = (dt_max - dt_min).days
+                # breakdowns
+                top_hour = dt.dt.hour.value_counts().idxmax()
+                top_hour_pct = _safe_div(dt.dt.hour.value_counts().max(), dt.shape[0])
+                top_dow = dt.dt.day_name().value_counts().idxmax()
+                top_dow_pct = _safe_div(dt.dt.day_name().value_counts().max(), dt.shape[0])
+                cs_parts.append(f"min={dt_min.isoformat(sep=' ')}")
+                cs_parts.append(f"max={dt_max.isoformat(sep=' ')}")
+                cs_parts.append(f"range_days={_fmt_int(date_range_days)}")
+                cs_parts.append(f"top_hour={int(top_hour)} ({_fmt_pct(top_hour_pct, format_percent_decimals)})")
+                cs_parts.append(f"top_day_of_week={top_dow} ({_fmt_pct(top_dow_pct, format_percent_decimals)})")
+                # seasonality hint
+                if top_hour_pct >= 0.2:
+                    seasonality = "strong daily pattern"
+                elif top_dow_pct >= 0.2:
+                    seasonality = "strong weekly pattern"
+                else:
+                    seasonality = "none obvious"
+                cs_parts.append(f"seasonality_hint={seasonality}")
+                if seasonality != "none obvious":
+                    insights.append("datetime_periodic")
+                    insights_explanations.append(f"datetime_periodic: {seasonality} detected (top hour/day frequency).")
+
+        # text-specific stats
+        if not is_numeric and not is_datetime:
+            # treat as text/categorical
+            col_text = col_nonnull.astype(str)
+            # basic lengths
+            if col_text.shape[0] > 0:
+                lengths = col_text.str.len()
+                avg_len = float(lengths.mean())
+                median_len = float(lengths.median())
+                cs_parts.append(f"avg_length={_fmt_float(avg_len, format_numeric_decimals)}")
+                cs_parts.append(f"median_length={_fmt_float(median_len, format_numeric_decimals)}")
+                # tokenization simple: split on whitespace, count unique tokens across column (if full mode)
+                if mode == "full":
+                    tokens = col_text.str.split().explode()
+                    token_counts = tokens.value_counts()
+                    n_unique_tokens = int(token_counts.shape[0])
+                    pct_unique_tokens = _safe_div(n_unique_tokens, max(1, tokens.shape[0]))
+                    cs_parts.append(f"n_unique_tokens={_fmt_int(n_unique_tokens)} ({_fmt_pct(pct_unique_tokens, format_percent_decimals)})")
+                    # top tokens
+                    top_tokens = token_counts.iloc[:5].index.tolist() if token_counts.shape[0] > 0 else []
+                    if len(top_tokens) > 0:
+                        cs_parts.append(f"top_tokens={','.join(map(str, top_tokens))}")
+                # structured pattern detection (emails, urls, phones)
+                # use simple regex heuristics
+                text_lower = col_text.str.lower()
+                email_mask = text_lower.str.contains(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", regex=True)
+                email_count = int(email_mask.sum())
+                url_mask = text_lower.str.contains(r"https?://|www\.", regex=True)
+                url_count = int(url_mask.sum())
+                phone_mask = text_lower.str.contains(r"\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?|\d{3})[-.\s]?\d{3}[-.\s]?\d{4}\b", regex=True)
+                phone_count = int(phone_mask.sum())
+                # zero-padding detection for text-like columns
+                zero_pad_flag = False
+                if col_text.shape[0] > 0:
+                    # check strings that start with 0 and have uniform length
+                    starts_with_zero = col_text.str.match(r"^0\d+")
+                    if starts_with_zero.sum() / col_text.shape[0] >= zero_pad_detection_threshold:
+                        # check if lengths are consistent
+                        lengths_with_zero = col_text[starts_with_zero].str.len()
+                        if lengths_with_zero.nunique() == 1 and lengths_with_zero.iloc[0] >= detect_zero_padding_min_length:
+                            zero_pad_flag = True
+                if email_count > 0 or url_count > 0 or phone_count > 0:
+                    pattern_flags = []
+                    if email_count > 0:
+                        pattern_flags.append(f"email({ _fmt_int(email_count) })")
+                    if url_count > 0:
+                        pattern_flags.append(f"url({ _fmt_int(url_count) })")
+                    if phone_count > 0:
+                        pattern_flags.append(f"phone({ _fmt_int(phone_count) })")
+                    cs_parts.append(f"structured_patterns={','.join(pattern_flags)}")
+                    insights.append("text_structured")
+                    insights_explanations.append(
+                        f"text_structured: Detected structured patterns (e.g., {', '.join([p.split('(')[0] for p in pattern_flags])})."
+                    )
+                if zero_pad_flag:
+                    cs_parts.append(f"zero_padding_detected=True")
+                    insights.append("zero_padding")
+                    insights_explanations.append("zero_padding: Leading zeros with consistent length detected; preserve formatting if this is an ID/code.")
+                # freeform heuristics: if avg length is long and entropy high -> freeform
+                if entropy_bits is not None and (avg_len > 20 and entropy_bits > 4.0):
+                    insights.append("text_freeform")
+                    insights_explanations.append("text_freeform: Long variable text with high token diversity suggests freeform text (comments/descriptions).")
+
+        # Final sparsity flag (in column_stats but also add to insights)
+        if pct_null >= sparse_threshold or (top1_pct_nonnull >= 0.9):
+            insights.append("sparse")
+            insights_explanations.append("sparse: Column is sparsely populated or dominated by a single value; consider dropping or special handling.")
+
+        # uniform distribution detection (if entropy computed)
+        if entropy_bits is not None and n_unique > 1:
+            max_entropy = math.log2(n_unique)
+            entropy_ratio = _safe_div(entropy_bits, max_entropy) if max_entropy > 0 else 0.0
+            if entropy_ratio >= uniform_entropy_ratio_threshold:
+                insights.append("uniform_distribution")
+                insights_explanations.append(
+                    f"uniform_distribution: Entropy ratio {_fmt_float(entropy_ratio, format_numeric_decimals)} is close to 1.0; frequencies are near-uniform."
+                )
+
+        # binary flag detection (including tolerance)
+        if n_nonnull > 0:
+            unique_vals = value_counts.index[:3].tolist()
+            if n_unique == 2:
+                # check coverage
+                two_cover = _safe_div(value_counts.iloc[:2].sum(), n_nonnull)
+                if two_cover >= binary_tolerance_pct:
+                    insights.append("binary_flag")
+                    insights_explanations.append("binary_flag: Column has two dominant values; behaves like a binary indicator.")
+            else:
+                # allow fuzzy case: if two values cover most rows
+                if n_unique > 2 and value_counts.iloc[:2].sum() / n_nonnull >= 0.98:
+                    insights.append("binary_like")
+                    insights_explanations.append("binary_like: Top two values cover >=98% of non-null rows; near-binary with minor noise.")
+
+        # Build final column_stats string
+        column_stats = "; ".join(cs_parts)
+
+        # Build insights strings
+        insights_str = "; ".join(insights) if insights else ""
+        insights_expl_str = " | ".join(insights_explanations) if insights_explanations else ""
+
+        # Append row
+        results.append(
+            {
+                "column_name": col,
+                "dtype_detected": dtype_detected,
+                "distribution_count": distribution_count,
+                "distribution_percentage": distribution_percentage,
+                "column_stats": column_stats,
+                "insights": insights_str,
+                "insights_explanation": insights_expl_str,
+            }
+        )
+
+    summary_df = pd.DataFrame(results, columns=[
+        "column_name",
+        "dtype_detected",
+        "distribution_count",
+        "distribution_percentage",
+        "column_stats",
+        "insights",
+        "insights_explanation"
+    ])
+    return summary_df
+
+
+########################################################################
+# Excel append function (separate, isolated I/O)
+########################################################################
+
+def append_analysis_to_excel(
+    df_analysis: pd.DataFrame,
+    table_name: str,
+    excel_path: str = "univariate_analysis.xlsx",
+    verbose: bool = True
+) -> str:
+    """
+    Append an analysis DataFrame as a new sheet to an Excel workbook with auto-versioning.
+
+    Behavior:
+    - If excel_path does not exist: create it and write sheet with sanitized table_name.
+    - If excel_path exists and contains a sheet named `table_name` (sanitized), pick a new sheet name:
+        attempt table_name, table_name_v2, table_name_v3, ... and write to the first non-existing one.
+      The base name will be truncated as needed to stay within Excel's 31-character limit.
+    - Returns the final sheet name used.
+
+    Note: This function intentionally does not alter df_analysis; it only writes its current content to Excel.
+    """
+
+    # sanitize and base sheet name
+    base_name = _clean_sheet_name(table_name, max_len=31)
+    # open workbook if exists to examine sheet names
+    if os.path.exists(excel_path):
+        # load workbook using openpyxl to read existing sheet names
+        try:
+            wb = openpyxl.load_workbook(excel_path)
+            existing_sheets = wb.sheetnames
+        except Exception as e:
+            raise RuntimeError(f"Unable to read existing Excel workbook '{excel_path}': {e}")
+    else:
+        wb = None
+        existing_sheets = []
+
+    # find next available sheet name with auto-versioning
+    candidate = base_name
+    if candidate in existing_sheets:
+        # find existing versions and pick next integer
+        # find existing sheets that start with base_name or base_name_vN
+        pattern = re.compile(re.escape(base_name) + r"(?:_v(\d+))?$")
+        max_v = 1
+        for s in existing_sheets:
+            m = pattern.match(s)
+            if m:
+                if m.group(1):
+                    try:
+                        max_v = max(max_v, int(m.group(1)))
+                    except Exception:
+                        pass
+                else:
+                    max_v = max(max_v, 1)
+        # choose next version
+        next_v = max_v + 1
+        # ensure truncation still leaves room for "_v{n}"
+        suffix = f"_v{next_v}"
+        if len(base_name) + len(suffix) > 31:
+            # trim base_name so that combined length is <= 31
+            trim_len = 31 - len(suffix)
+            base_trimmed = base_name[:trim_len]
+            candidate = base_trimmed + suffix
+        else:
+            candidate = base_name + suffix
+
+        # ensure candidate not already present (edge cases)
+        v_try = next_v
+        while candidate in existing_sheets:
+            v_try += 1
+            suffix = f"_v{v_try}"
+            if len(base_name) + len(suffix) > 31:
+                trim_len = 31 - len(suffix)
+                base_trimmed = base_name[:trim_len]
+                candidate = base_trimmed + suffix
+            else:
+                candidate = base_name + suffix
+
+    # Now write df_analysis to the excel workbook under sheet name `candidate`
+    # We'll use pandas.ExcelWriter with openpyxl engine and mode 'a' to append or 'w' to create.
+    try:
+        if wb is None:
+            # create new workbook and write
+            with pd.ExcelWriter(excel_path, engine="openpyxl", mode="w") as writer:
+                df_analysis.to_excel(writer, sheet_name=candidate, index=False)
+        else:
+            # append to existing workbook without losing other sheets
+            with pd.ExcelWriter(excel_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+                # pandas 1.3+ supports if_sheet_exists; we use candidate which we ensured is unique
+                df_analysis.to_excel(writer, sheet_name=candidate, index=False)
+    except TypeError:
+        # older pandas might not support if_sheet_exists param; fall back to manual approach
+        from openpyxl import Workbook
+        if wb is None:
+            wb = Workbook()
+            wb.remove(wb.active)
+        # convert DataFrame to sheet
+        from openpyxl.utils.dataframe import dataframe_to_rows
+        ws = wb.create_sheet(title=candidate)
+        for r in dataframe_to_rows(df_analysis, index=False, header=True):
+            ws.append(r)
+        wb.save(excel_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to write analysis to Excel: {e}")
+
+    if verbose:
+        print(f"Wrote analysis to '{excel_path}' sheet '{candidate}'")
+    return candidate
+
