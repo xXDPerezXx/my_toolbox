@@ -1,0 +1,162 @@
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import pandas as pd
+import numpy as np
+
+def smart_plot_dual(y1, y2, sorting=None, ascending=True, show_na=True, 
+                    shift=0.3, bar_width=0.7, transparency=0.5, sync_zero=True, 
+                    use_percentages=False, title=None, xlabel=None, 
+                    y1_label='Dataset 1', y2_label='Dataset 2',
+                    color1='navy', color2='coral', size=(12, 7), 
+                    show_labels=True, rotation=90, label_rot=45):
+    
+    """
+    Advanced dual Y-axis visualization with customizable overlap and category spacing.
+
+    DESIGN PHILOSOPHY:
+    - Flexible Geometry: Adjust 'bar_width' to toggle between a solid histogram wall (1.0) 
+    and gapped categories (< 1.0) as seen in multi-bar charts.
+    - Symmetric Overlap: The 'shift' parameter offsets bars away from the center of 
+    the category, allowing for 'bleeding' into neighboring spaces or local stepping.
+    - Depth-Linked Transparency: The foreground (y2) axis is assigned a higher z-order. 
+    The 'transparency' parameter affects both the bar fill and its edges.
+    - Robust NA Handling: Automatically converts NaN values to 'N/A' strings and 
+    pins them to the far right of the X-axis regardless of sorting.
+
+    PARAMETERS:
+    ----------
+    y1, y2 : array-like
+        Raw datasets to be aggregated via value_counts().
+    sorting : str, optional (default: None)
+        The metric for X-axis order: None (Alphabetical), 'y1' (Dataset 1), 'y2' (Dataset 2).
+    ascending : bool (default: True)
+        Direction of the sort.
+    show_na : bool (default: True)
+        If True, includes an 'N/A' category for missing values.
+    shift : float (default: 0.3)
+        How far bars are offset from the center (0.0 = total overlap, 1.0 = side-by-side).
+    bar_width : float (default: 0.7)
+        Thickness of bars. 1.0 makes bars touch neighbors; < 1.0 creates category gaps.
+    transparency : float (default: 0.5)
+        Alpha value (0 to 1) for the foreground bars and their edges.
+    sync_zero : bool (default: True)
+        Forces the zero-line to align for both independent Y-axes.
+    use_percentages : bool (default: False)
+        Normalizes counts to percentages of their respective dataset totals.
+    y1_label, y2_label : str
+        Display names for the datasets used in axes and legends.
+    color1, color2 : str
+        Color names for the background (y1) and foreground (y2) bars.
+    size : tuple (default: (12, 7))
+        Figure width and height in inches.
+    show_labels : bool (default: True)
+        Toggles the value labels (counts or %) on top of the bars.
+    rotation : int (default: 90)
+        Rotation angle for the X-axis category labels.
+    label_rot : int (default: 45)
+        Rotation angle for the data labels sitting on top of the bars.
+    """
+    
+    # 1. DATA PROCESSING
+    s1 = pd.Series(y1)
+    s2 = pd.Series(y2)
+    
+    if show_na:
+        s1 = s1.fillna('N/A')
+        s2 = s2.fillna('N/A')
+    
+    counts1 = s1.value_counts(dropna=not show_na)
+    counts2 = s2.value_counts(dropna=not show_na)
+    
+    if use_percentages:
+        counts1 = (counts1 / counts1.sum()) * 100
+        counts2 = (counts2 / counts2.sum()) * 100
+
+    df = pd.DataFrame({y1_label: counts1, y2_label: counts2}).fillna(0)
+
+    # 2. SORTING (Pinning 'N/A' to the end)
+    is_na = df.index.astype(str) == 'N/A'
+    
+    if is_na.any():
+        df_no_nan = df[~is_na]
+        df_only_nan = df[is_na]
+    else:
+        df_no_nan = df
+        df_only_nan = pd.DataFrame()
+
+    if sorting == 'y1':
+        df_sorted = df_no_nan.sort_values(by=y1_label, ascending=ascending)
+    elif sorting == 'y2':
+        df_sorted = df_no_nan.sort_values(by=y2_label, ascending=ascending)
+    else:
+        df_sorted = df_no_nan.sort_index(ascending=ascending)
+
+    df = pd.concat([df_sorted, df_only_nan])
+
+    # 3. SETUP FIGURE
+    fig, ax1 = plt.subplots(figsize=size)
+    ax2 = ax1.twinx()
+
+    # 4. GEOMETRY & PLOTTING
+    x_indexes = np.arange(len(df))
+    
+    # Symmetric Shift Logic
+    pos1 = x_indexes - (shift / 2)
+    pos2 = x_indexes + (shift / 2)
+    
+    # Background Bars
+    rects1 = ax1.bar(pos1, df[y1_label], bar_width, color=color1, label=y1_label, 
+                     alpha=1.0, edgecolor='black', linewidth=0.8, zorder=1)
+    
+    # Foreground Bars (Edge transparency scales with fill)
+    edge_color2 = (0, 0, 0, transparency)
+    rects2 = ax2.bar(pos2, df[y2_label], bar_width, color=color2, label=y2_label, 
+                     alpha=transparency, edgecolor=edge_color2, linewidth=0.8, zorder=2)
+
+    # 5. SYNC ZERO & DYNAMIC MARGINS
+    if sync_zero:
+        for ax in [ax1, ax2]:
+            curr_y = ax.get_ylim()
+            max_y = max(abs(curr_y[0]), abs(curr_y[1]))
+            ax.set_ylim(min(curr_y[0], 0) * 1.1, max_y * 1.1)
+
+    # Margin handles the overhang of shifted bars
+    ax1.set_xlim(min(pos1) - 0.8, max(pos2) + 0.8)
+
+    # 6. STYLING (Solid Baseline & No Grid)
+    ax1.axhline(0, color='black', linewidth=1.5, zorder=3)
+    
+    ax1.set_ylabel(y1_label, color=color1, fontweight='bold')
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.spines['left'].set_color(color1)
+    ax1.spines['left'].set_linewidth(2)
+    
+    ax2.set_ylabel(y2_label, color=color2, fontweight='bold')
+    ax2.tick_params(axis='y', labelcolor=color2)
+    ax2.spines['right'].set_color(color2)
+    ax2.spines['right'].set_linewidth(2)
+    
+    ax1.grid(False)
+    ax2.grid(False)
+
+    axis_fmt = ticker.StrMethodFormatter('{x:,.1f}%' if use_percentages else '{x:,.0f}')
+    ax1.yaxis.set_major_formatter(axis_fmt)
+    ax2.yaxis.set_major_formatter(axis_fmt)
+
+    # 7. LABELS AND LEGEND
+    ax1.set_xticks(x_indexes)
+    ax1.set_xticklabels(df.index.astype(str), rotation=rotation)
+    if xlabel: ax1.set_xlabel(xlabel)
+    if title: plt.title(title, pad=30, fontsize=14, fontweight='bold')
+
+    if show_labels:
+        lbl_fmt = (lambda x: f'{x:,.1f}%' if use_percentages else f'{x:,.0f}')
+        ax1.bar_label(rects1, padding=5, fmt=lbl_fmt, color=color1, fontweight='bold', rotation=label_rot)
+        ax2.bar_label(rects2, padding=5, fmt=lbl_fmt, color=color2, fontweight='bold', rotation=label_rot)
+
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax1.legend(h1+h2, l1+l2, loc='upper center', bbox_to_anchor=(0.5, -0.25), ncol=2)
+
+    plt.tight_layout()
+    plt.show()
