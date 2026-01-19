@@ -1,0 +1,164 @@
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import pandas as pd
+import numpy as np
+
+def smart_plot(x, y=None, kind='bar', grouping=False, sorting_x=False, 
+               title=None, xlabel=None, ylabel=None, show_labels=None, 
+               size=(12, 7), bins=None):
+    """
+    Professional visualization tool for single-variable analysis and distributions.
+    Automatically handles scientific notation, integer axis scaling, and 
+    statistical summaries for histograms.
+
+    DESIGN PHILOSOPHY:
+    - Eliminates scientific notation for large currency or volume values.
+    - Ensures Y-axis labels are integers for small counts (preventing duplicate ticks).
+    - Standardizes chart width via subplots_adjust for consistent visual reporting.
+
+    PARAMETERS:
+    ----------
+    x : array-like
+        The primary data to plot. For histograms, this is the distribution.
+        For bar/line/scatter, this is the X-axis category or value.
+    y : array-like, optional (default: None)
+        The Y-axis values for 'bar', 'line', or 'scatter' plots.
+    kind : str, optional (default: 'bar')
+        Type of chart to generate: 'bar', 'line', 'scatter', or 'histogram'.
+    grouping : bool, optional (default: False)
+        If True, performs a value_counts() on 'x' to generate frequency charts.
+    sorting_x : bool, optional (default: False)
+        If True, sorts the X-axis categories alphabetically/numerically.
+        If False, sorts by frequency (when grouping=True).
+    title : str, optional (default: None)
+        The main title of the plot.
+    xlabel / ylabel : str, optional (default: None)
+        Labels for the respective axes.
+    show_labels : bool, optional (default: None)
+        Toggles data labels on bars/lines/boxplot. Defaults to True for histograms.
+    size : tuple, optional (default: (12, 7))
+        The figure dimensions in inches.
+    bins : int or sequence, optional (default: None)
+        Number of bins to use for histograms.
+
+    HISTOGRAM SPECIFICS:
+    -------------------
+    Includes a marginal boxplot frame above the histogram. Labels (min, med, max) 
+    are placed in the 'top lane' and quartiles (q1, q3) in the 'bottom lane' 
+    within the frame to prevent text collision in tight distributions.
+    """
+    # 1. SET DEFAULT LABEL BEHAVIOR
+    if show_labels is None:
+        show_labels = True if kind == 'histogram' else False
+
+    # 2. SETUP FIGURE
+    fig = plt.figure(figsize=size)
+    
+    if kind == 'histogram':
+        # Slightly larger hspace to accommodate labels below the boxplot
+        gs = fig.add_gridspec(2, 1, height_ratios=(1.2, 6), hspace=0.15)
+        ax_box = fig.add_subplot(gs[0])
+        ax = fig.add_subplot(gs[1])
+    else:
+        ax = fig.add_subplot(1, 1, 1)
+
+    # 3. DATA PROCESSING
+    stats_df = None
+    is_x_numeric = False
+
+    if kind == 'histogram':
+        data = np.array(x)
+        is_x_numeric = True
+        q1, med, q3 = np.percentile(data, [25, 50, 75])
+        d_min, d_max = data.min(), data.max()
+        
+        stats_df = pd.DataFrame({
+            'Stat': ['min', 'q1', 'med', 'q3', 'max'],
+            'Value': [f"{v:,.0f}" for v in [d_min, q1, med, q3, d_max]]
+        })
+
+        # Plot Boxplot (widths=0.3 to leave room for labels above/below)
+        ax_box.boxplot(data, vert=False, patch_artist=True, widths=0.3,
+                       showfliers=False,
+                       boxprops=dict(facecolor='skyblue', color='black', linewidth=1),
+                       medianprops=dict(color='black', linewidth=1),
+                       whiskerprops=dict(color='black', linewidth=1),
+                       capprops=dict(color='black', linewidth=1))
+        
+        # Style Boxplot Frame
+        for spine in ax_box.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(1)
+        ax_box.set_xticks([])
+        ax_box.set_yticks([])
+        # Ensure frame has enough vertical room for labels
+        ax_box.set_ylim(0.5, 1.5)
+
+        # FIXED TOP/BOTTOM STAGGERED LABELS
+        if show_labels:
+            # Top row: min, med, max
+            for val, txt in zip([d_min, med, d_max], ['min', 'med', 'max']):
+                ax_box.text(val, 1.25, txt, ha='center', va='bottom', fontsize=9)
+            
+            # Bottom row: q1, q3
+            for val, txt in zip([q1, q3], ['q1', 'q3']):
+                ax_box.text(val, 0.75, txt, ha='center', va='top', fontsize=9)
+
+        ax.hist(data, bins=bins, color='skyblue', edgecolor='black', linewidth=1)
+        
+        # Sync X-limits with auto-scale padding
+        buffer = (d_max - d_min) * 0.02 if d_max != d_min else 1
+        ax.set_xlim(d_min - buffer, d_max + buffer)
+        ax_box.set_xlim(ax.get_xlim())
+
+    else:
+        # Standard Plotting Logic (Bar, Line, Scatter)
+        if grouping:
+            series = pd.Series(x)
+            counts = series.value_counts()
+            if sorting_x: counts = counts.sort_index()
+            else: counts = counts.sort_values(ascending=False)
+            plot_x, plot_y = counts.index.astype(str), counts.values
+            is_x_numeric = False
+        else:
+            plot_x, plot_y = x, (y if y is not None else x)
+            sample_val = np.array(plot_x)[0] if len(plot_x) > 0 else None
+            is_x_numeric = isinstance(sample_val, (int, float, np.number))
+
+        if kind == 'bar':
+            container = ax.bar(plot_x, plot_y, color='skyblue', edgecolor='black', linewidth=1)
+            if show_labels:
+                ax.bar_label(container, labels=[f'{v:,.0f}' for v in plot_y], padding=3)
+        
+        elif kind == 'line':
+            ax.plot(plot_x, plot_y, marker='o', color='navy', linewidth=1)
+            if show_labels:
+                for i, val in enumerate(plot_y):
+                    ax.annotate(f'{val:,.0f}', (plot_x[i], plot_y[i]), 
+                                textcoords="offset points", xytext=(0, 10), ha='center')
+                                
+        elif kind == 'scatter':
+            ax.scatter(plot_x, plot_y, color='navy', edgecolor='black', linewidth=1)
+
+    # 4. FORMATTING & INTEGER FIX
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+    comma_fmt = ticker.StrMethodFormatter('{x:,.0f}')
+    ax.yaxis.set_major_formatter(comma_fmt)
+    if is_x_numeric:
+        ax.xaxis.set_major_formatter(comma_fmt)
+    
+    ax.tick_params(axis='x', labelbottom=True)
+    for spine in ax.spines.values():
+        spine.set_linewidth(1)
+    
+    # 5. TITLES & MARGINS
+    if title:
+        fig.suptitle(title, fontsize=16)
+    
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    
+    plt.subplots_adjust(left=0.12, right=0.95, top=0.90, bottom=0.12)
+    plt.show()
+
+    return stats_df
