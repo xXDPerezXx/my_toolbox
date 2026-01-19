@@ -1,0 +1,141 @@
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import pandas as pd
+import numpy as np
+
+def smart_plot_dual(y1, y2, sorting=None, ascending=True, show_na=True, 
+                    sync_zero=True, use_percentages=False, title=None, 
+                    xlabel=None, y1_label='Dataset 1', y2_label='Dataset 2',
+                    color1='navy', color2='coral', show_grid=True, 
+                    size=(12, 7), show_labels=True):
+    
+    """
+    Advanced dual Y-axis visualization for comparing two independent distributions.
+    Optimized for 'Value Count' comparisons between two raw datasets.
+
+    DESIGN PHILOSOPHY:
+    - Color-Linkage: The left/right spines, ticks, and labels match the data color.
+    - Scale Independence: Safely plots massive volume (e.g., millions) vs. small 
+    counts (e.g., units) side-by-side.
+    - Zero-Alignment: Ensures the horizontal '0' line is identical for both scales.
+
+    PARAMETERS:
+    ----------
+    y1 : array-like
+        Primary raw dataset. Function will perform value_counts() automatically.
+    y2 : array-like
+        Secondary raw dataset for comparison on the right Y-axis.
+    sorting : str, optional (default: None)
+        The column to prioritize for the X-axis order. 
+        Options: None (Alphabetical), 'y1' (Dataset 1 frequency), 'y2' (Dataset 2 frequency).
+    ascending : bool, optional (default: True)
+        Direction of the sort.
+    show_na : bool, optional (default: True)
+        If True, missing values are displayed as an 'N/A' category.
+    sync_zero : bool, optional (default: True)
+        Forces both Y-axes to share the same horizontal zero-mark, essential for 
+        accurate visual comparison if negative values exist.
+    use_percentages : bool, optional (default: False)
+        Converts raw counts into percentages of their respective total. 
+        Recommended when comparing datasets with very different sample sizes.
+    title / xlabel : str, optional (default: None)
+        Plot title and horizontal axis label.
+    y1_label / y2_label : str, optional (default: 'Dataset 1'/'Dataset 2')
+        Display names for the datasets (used in legends and axis titles).
+    color1 / color2 : str, optional
+        Colors for the datasets. Defaults to 'navy' (left) and 'coral' (right).
+    show_grid : bool, optional (default: True)
+        Toggles horizontal gridlines. Lines appear only for the left axis to 
+        maintain visual clarity.
+    size : tuple, optional (default: (12, 7))
+        Figure dimensions in inches.
+    show_labels : bool, optional (default: True)
+        Toggles value labels on top of each bar.
+
+    DATA ALIGNMENT:
+    --------------
+    The function performs an 'Outer Join' on the categories of y1 and y2. If a 
+    category exists in one dataset but not the other, it is plotted with a 
+    height of 0 to ensure perfect X-axis alignment.
+    """
+    
+    # 1. PREPARE DATA
+    s1 = pd.Series(y1).value_counts(dropna=not show_na)
+    s2 = pd.Series(y2).value_counts(dropna=not show_na)
+    
+    if use_percentages:
+        s1 = (s1 / s1.sum()) * 100
+        s2 = (s2 / s2.sum()) * 100
+
+    df = pd.DataFrame({y1_label: s1, y2_label: s2}).fillna(0)
+
+    # 2. SORTING
+    if sorting == 'y1':
+        df = df.sort_values(by=y1_label, ascending=ascending)
+    elif sorting == 'y2':
+        df = df.sort_values(by=y2_label, ascending=ascending)
+    else:
+        df = df.sort_index(ascending=ascending)
+
+    # 3. SETUP FIGURE
+    fig, ax1 = plt.subplots(figsize=size)
+    ax2 = ax1.twinx()
+
+    # 4. PLOTTING
+    x_indexes = np.arange(len(df))
+    width = 0.35
+    
+    rects1 = ax1.bar(x_indexes - width/2, df[y1_label], width, 
+                     color=color1, label=y1_label, alpha=0.8, edgecolor='black')
+    rects2 = ax2.bar(x_indexes + width/2, df[y2_label], width, 
+                     color=color2, label=y2_label, alpha=0.8, edgecolor='black')
+
+    # 5. SYNC ZERO-LINE
+    if sync_zero:
+        l1, r1 = ax1.get_ylim()
+        l2, r2 = ax2.get_ylim()
+        # Ensure 0 is at the same relative position
+        max_val1 = max(abs(l1), abs(r1))
+        max_val2 = max(abs(l2), abs(r2))
+        ax1.set_ylim(min(l1, 0) * 1.1, max_val1 * 1.1)
+        ax2.set_ylim(min(l2, 0) * 1.1, max_val2 * 1.1)
+
+    # 6. STYLING (Spines and Colors)
+    ax1.set_ylabel(y1_label, color=color1, fontweight='bold')
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.spines['left'].set_color(color1)
+    ax1.spines['left'].set_linewidth(2)
+    
+    ax2.set_ylabel(y2_label, color=color2, fontweight='bold')
+    ax2.tick_params(axis='y', labelcolor=color2)
+    ax2.spines['right'].set_color(color2)
+    ax2.spines['right'].set_linewidth(2)
+    
+    # Axis Tick Formatting (Uses {x} syntax)
+    axis_fmt = ticker.StrMethodFormatter('{x:,.1f}%' if use_percentages else '{x:,.0f}')
+    ax1.yaxis.set_major_formatter(axis_fmt)
+    ax2.yaxis.set_major_formatter(axis_fmt)
+
+    # 7. LABELS AND LEGEND
+    ax1.set_xticks(x_indexes)
+    ax1.set_xticklabels(df.index.astype(str))
+    if xlabel: ax1.set_xlabel(xlabel)
+    if title: plt.title(title, pad=20, fontsize=14)
+    
+    if show_grid:
+        ax1.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # 8. BAR LABELS (The Fix)
+    if show_labels:
+        # We use a lambda function to format the number correctly for bar_label
+        label_func = (lambda x: f'{x:,.1f}%') if use_percentages else (lambda x: f'{x:,.0f}')
+        ax1.bar_label(rects1, padding=3, fmt=label_func, color=color1, fontweight='bold')
+        ax2.bar_label(rects2, padding=3, fmt=label_func, color=color2, fontweight='bold')
+
+    # Merge legends
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax1.legend(h1+h2, l1+l2, loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=2)
+
+    plt.tight_layout()
+    plt.show()
