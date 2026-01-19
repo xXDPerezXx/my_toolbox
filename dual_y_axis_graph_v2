@@ -160,3 +160,48 @@ def smart_plot_dual(y1, y2, sorting=None, ascending=True, show_na=True,
 
     plt.tight_layout()
     plt.show()
+
+
+
+
+
+
+EXAMPLES:
+
+# Target goals vs. Actual results
+targets = np.random.choice(['Q1', 'Q2', 'Q3', 'Q4'], 1000, p=[0.25, 0.25, 0.25, 0.25])
+actuals = np.random.choice(['Q1', 'Q2', 'Q3', 'Q4'], 850, p=[0.2, 0.3, 0.1, 0.4])
+
+smart_plot_dual(targets, actuals, 
+                bar_width=0.8, 
+                shift=0.1,         # Very slight shift for a "shadow" effect
+                transparency=0.4,  # High transparency
+                y1_label="Quarterly Target", y2_label="Actual Count",
+                color1='gray', color2='limegreen',
+                title="Ghosted Performance Overlay")
+
+# Comparative survey data across departments
+dept_a = ['HR']*40 + ['Eng']*120 + ['Sales']*90 + ['Legal']*20
+dept_b = ['HR']*35 + ['Eng']*100 + ['Sales']*110 + ['Legal']*45
+
+smart_plot_dual(dept_a, dept_b, 
+                bar_width=0.5,     # Narrow bars for large gaps
+                shift=0.4,         # Shift creates the "stepped" look
+                transparency=0.7, 
+                sorting='y1', ascending=False,
+                y1_label="Internal Audit", y2_label="External Review",
+                color1='steelblue', color2='goldenrod',
+                title="Departmental Discrepancy Analysis")
+
+# Global population vs. Small focus group
+global_data = np.random.choice(['Feature A', 'Feature B', 'Feature C'], 1000000)
+focus_group = np.random.choice(['Feature A', 'Feature B', 'Feature C'], 50)
+
+smart_plot_dual(global_data, focus_group, 
+                use_percentages=True,
+                bar_width=1.0,      # Back to the "Wall" style
+                shift=0.5,          # Heavy bleeding into neighbors
+                transparency=0.6,
+                y1_label="Global Usage %", y2_label="Focus Group %",
+                color1='purple', color2='turquoise',
+                title="Scale-Independent Percentage Distribution")
