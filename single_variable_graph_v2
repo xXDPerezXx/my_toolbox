@@ -8,14 +8,117 @@ def smart_plot(data, chart_type='bar', sorting=None, ascending=True, show_na=Tru
                title=None, xlabel=None, ylabel='Counts', color='teal', 
                size=(12, 7), show_labels=True, rotation=90, label_rot=0, 
                label_pad=None, show_boxplot=True):
-    """
-    Capable AI Thought Partner: Final Integrated Smart Plot.
     
-    Features:
-    - Split-Window Grid for Histograms (Boxplot on top).
-    - Dynamic 'Safety Buffer' for centered X-axis titles.
-    - Persistent, black statistical labels for boxplots.
-    - Right-aligned 'hanging' ticks for rotated labels.
+    """
+    smart_plot(data, chart_type='bar', sorting=None, ascending=True, show_na=True, 
+            title=None, xlabel=None, ylabel='Counts', color='teal', 
+            size=(12, 7), show_labels=True, rotation=90, label_rot=0, 
+            label_pad=None, show_boxplot=True)
+
+    A highly intelligent visualization engine designed to handle categorical and numerical 
+    distributions with automatic layout management and professional-grade aesthetics.
+
+    The function features a "Split-Window" architecture for histograms, dynamic "Safety 
+    Buffer" calculations for axis titles, and persistent statistical overlays.
+
+    PARAMETERS:
+    -----------
+    data : array-like (List, NumPy Array, or Pandas Series)
+        The input dataset. Can contain strings (categorical) or numbers (numerical).
+        NaN values are handled based on the 'show_na' parameter.
+
+    chart_type : str, default 'bar'
+        The visualization style to generate:
+        - 'bar'     : Categorical counts. Supports bar_labels.
+        - 'line'    : Trend analysis. Supports data point labels.
+        - 'scatter' : Distribution view. Labels are disabled for clarity.
+        - 'hist'    : Frequency distribution. Triggers the dual-frame GridSpec 
+                    layout if 'show_boxplot' is True.
+
+    sorting : str, optional (None or 'freq')
+        Determines the order of categories on the X-axis:
+        - None   : Sorts alphabetically/numerically by the index names.
+        - 'freq' : Sorts based on the count/frequency of each category.
+        Note: If 'N/A' is present, it is always pinned to the far right.
+
+    ascending : bool, default True
+        Determines the direction of the 'sorting' parameter.
+
+    show_na : bool, default True
+        If True, missing values are visualized as an 'N/A' category. 
+        If False, missing values are dropped from the visualization.
+
+    title : str, optional
+        The main title of the figure. Positioned with a fixed 'y' offset to 
+        prevent overlap with the top frame or boxplot labels.
+
+    xlabel : str, optional
+        The centered title for the X-axis. Its vertical distance from the 
+        chart is controlled by the dynamic "Safety Buffer" math.
+
+    ylabel : str, default 'Counts'
+        The title for the Y-axis. Automatically formatted with thousands-separators.
+
+    color : str, default 'teal'
+        The primary color for bars, lines, markers, or histogram bins.
+
+    size : tuple, default (12, 7)
+        The (Width, Height) of the resulting figure in inches.
+
+    show_labels : bool, default True
+        Toggles the visibility of numeric values on top of bars and line points.
+        Does not affect Boxplot statistical labels (which are persistent).
+
+    rotation : int, default 90
+        The rotation angle (degrees) for the X-axis tick labels. 
+        Labels are right-aligned ('ha'='right') to ensure they "hang" from 
+        the tick marks when rotated, preventing overlap with the axis line.
+
+    label_rot : int, default 0
+        The rotation angle for the numeric data labels on bars and lines.
+        Maintains a horizontal (0°) orientation by default for maximum readability.
+
+    label_pad : float, optional
+        Manual "legroom" adjustment for the xlabel. This value is ADDED to the 
+        automatic safety buffer. Use this if your labels are unusually wide.
+
+    show_boxplot : bool, default True
+        Specific to 'hist' chart_type.
+        - True  : Creates a 2-row GridSpec. The top row (15% height) contains 
+                a fully-bordered boxplot with persistent black labels for 
+                Min, Median, and Max. The top X-axis ticks are hidden.
+        - False : Disables the grid. The histogram fills the entire frame. 
+                Triggers "Relaxed Padding" (Option A) for a tighter title gap.
+
+    INTERNAL LOGIC & DESIGN PRINCIPLES:
+    -----------------------------------
+    1. THE SPLIT-WINDOW GRID: 
+    In histogram mode, the function utilizes 'matplotlib.gridspec' to physically 
+    decouple the Boxplot from the Histogram. This ensures the Boxplot always 
+    sits in a "Penthouse" frame above the data, avoiding the bottom-squish 
+    common in dual-axis plots.
+
+    2. THE SAFETY BUFFER (DYNAMIC PADDING):
+    The function calculates the length of the longest X-axis label and the 
+    specified rotation to determine how much vertical space is needed. 
+    - Vertical labels (90°) trigger a larger buffer (~4pts per character).
+    - Horizontal labels (0°) trigger a standard tight buffer.
+    - If 'show_boxplot' is False, the buffer is "relaxed" (reduced by 30%) 
+        to provide a more compact and integrated look.
+
+    3. PERSISTENT STATISTICS:
+    Regardless of the 'color' parameter, boxplot statistical labels (Min, Med, 
+    Max) and data labels on bars/lines are rendered in BLACK to ensure 
+    mathematical clarity against colorful backgrounds.
+
+    4. ALIGNMENT SYNC:
+    The Top Boxplot frame and Bottom Histogram frame are hard-linked on the 
+    X-axis. A vertical scan from a boxplot feature (like the Median line) 
+    will land perfectly on the corresponding value in the histogram.
+
+    RETURNS:
+    --------
+    None. Displays the plot directly via plt.show().
     """
     
     # 1. DATA PROCESSING
