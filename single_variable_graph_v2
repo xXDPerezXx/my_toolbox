@@ -15,11 +15,13 @@ def smart_plot(data, chart_type='bar', sorting=None, ascending=True, show_na=Tru
             size=(12, 7), show_labels=True, rotation=90, label_rot=0, 
             label_pad=None, show_boxplot=True)
 
-    A highly intelligent visualization engine designed to handle categorical and numerical 
-    distributions with automatic layout management and professional-grade aesthetics.
+    A robust, "smart" visualization engine designed to handle both categorical and numerical 
+    distributions with automatic layout management, dual-frame architectures, and professional 
+    formatting standards.
 
-    The function features a "Split-Window" architecture for histograms, dynamic "Safety 
-    Buffer" calculations for axis titles, and persistent statistical overlays.
+    The function features a "Split-Window" grid for histograms, tiered statistical labeling, 
+    and universal comma-separated formatting to ensure readability at any scale (from dozens 
+    to millions of records).
 
     PARAMETERS:
     -----------
@@ -29,8 +31,8 @@ def smart_plot(data, chart_type='bar', sorting=None, ascending=True, show_na=Tru
 
     chart_type : str, default 'bar'
         The visualization style to generate:
-        - 'bar'     : Categorical counts. Supports bar_labels.
-        - 'line'    : Trend analysis. Supports data point labels.
+        - 'bar'     : Categorical counts. Supports comma-separated bar_labels.
+        - 'line'    : Trend analysis. Supports comma-separated data point labels.
         - 'scatter' : Distribution view. Labels are disabled for clarity.
         - 'hist'    : Frequency distribution. Triggers the dual-frame GridSpec 
                     layout if 'show_boxplot' is True.
@@ -49,15 +51,17 @@ def smart_plot(data, chart_type='bar', sorting=None, ascending=True, show_na=Tru
         If False, missing values are dropped from the visualization.
 
     title : str, optional
-        The main title of the figure. Positioned with a fixed 'y' offset to 
-        prevent overlap with the top frame or boxplot labels.
+        The main title of the figure. Centered and positioned with a fixed 
+        offset to prevent overlap with the top frame.
 
     xlabel : str, optional
         The centered title for the X-axis. Its vertical distance from the 
-        chart is controlled by the dynamic "Safety Buffer" math.
+        chart is controlled by a dynamic "Safety Buffer" math to accommodate 
+        long labels and 90-degree rotations.
 
     ylabel : str, default 'Counts'
-        The title for the Y-axis. Automatically formatted with thousands-separators.
+        The title for the Y-axis. The axis ticks are automatically formatted 
+        with comma-separators and whole-number rounding.
 
     color : str, default 'teal'
         The primary color for bars, lines, markers, or histogram bins.
@@ -67,54 +71,57 @@ def smart_plot(data, chart_type='bar', sorting=None, ascending=True, show_na=Tru
 
     show_labels : bool, default True
         Toggles the visibility of numeric values on top of bars and line points.
-        Does not affect Boxplot statistical labels (which are persistent).
+        Values are formatted as comma-separated integers (e.g., 1,498,600).
 
     rotation : int, default 90
         The rotation angle (degrees) for the X-axis tick labels. 
         Labels are right-aligned ('ha'='right') to ensure they "hang" from 
-        the tick marks when rotated, preventing overlap with the axis line.
+        the tick marks cleanly, preventing overlap with the axis line.
 
     label_rot : int, default 0
         The rotation angle for the numeric data labels on bars and lines.
-        Maintains a horizontal (0°) orientation by default for maximum readability.
+        Maintains a horizontal (0°) orientation by default.
 
     label_pad : float, optional
         Manual "legroom" adjustment for the xlabel. This value is ADDED to the 
-        automatic safety buffer. Use this if your labels are unusually wide.
+        automatic safety buffer.
 
     show_boxplot : bool, default True
-        Specific to 'hist' chart_type.
-        - True  : Creates a 2-row GridSpec. The top row (15% height) contains 
-                a fully-bordered boxplot with persistent black labels for 
-                Min, Median, and Max. The top X-axis ticks are hidden.
+        Specific to the 'hist' chart_type:
+        - True  : Creates a 2-row GridSpec layout. The top frame (the "Penthouse") 
+                is a fully-bordered box containing the boxplot and its 
+                Five-Point Summary. Top X-axis ticks and the Y-axis "1" are hidden.
         - False : Disables the grid. The histogram fills the entire frame. 
-                Triggers "Relaxed Padding" (Option A) for a tighter title gap.
+                Triggers a "relaxed" padding math to pull the xlabel closer.
+
+    TIERED BOXPLOT LABELING (for 'hist' mode):
+    ------------------------------------------
+    When the boxplot is active, the function calculates five distinct statistical 
+    labels using pandas-based logic. To maximize space and clarity, these are 
+    split into two tiers within the boxplot frame:
+    1. TOP TIER: Min, Med, and Max are positioned above the box/whiskers.
+    2. BOTTOM TIER: Q1 and Q3 are positioned below the box/whiskers.
+    Styling: All five labels are rendered in regular font weight (not bold), 
+    black color, center-aligned, and at a slightly smaller font size (size 9) 
+    to ensure legibility without crowding.
 
     INTERNAL LOGIC & DESIGN PRINCIPLES:
     -----------------------------------
-    1. THE SPLIT-WINDOW GRID: 
-    In histogram mode, the function utilizes 'matplotlib.gridspec' to physically 
-    decouple the Boxplot from the Histogram. This ensures the Boxplot always 
-    sits in a "Penthouse" frame above the data, avoiding the bottom-squish 
-    common in dual-axis plots.
+    1. UNIVERSAL FORMATTING: All numeric values across the entire plot—including 
+    axis ticks, bar labels, and boxplot stats—are formatted as comma-separated 
+    integers ({:,.0f}). This eliminates scientific notation for large datasets.
 
-    2. THE SAFETY BUFFER (DYNAMIC PADDING):
-    The function calculates the length of the longest X-axis label and the 
-    specified rotation to determine how much vertical space is needed. 
-    - Vertical labels (90°) trigger a larger buffer (~4pts per character).
-    - Horizontal labels (0°) trigger a standard tight buffer.
-    - If 'show_boxplot' is False, the buffer is "relaxed" (reduced by 30%) 
-        to provide a more compact and integrated look.
+    2. SPLIT-WINDOW GRID: Uses 'matplotlib.gridspec' to physically decouple the 
+    boxplot from the histogram. This ensures that the boxplot never sits at 
+    the "bottom" of the graph regardless of the histogram's bar height.
 
-    3. PERSISTENT STATISTICS:
-    Regardless of the 'color' parameter, boxplot statistical labels (Min, Med, 
-    Max) and data labels on bars/lines are rendered in BLACK to ensure 
-    mathematical clarity against colorful backgrounds.
+    3. SAFETY BUFFER: The padding for the X-axis title is calculated by measuring 
+    the longest label in the dataset and factoring in the rotation angle. 
+    This ensures that 90-degree "hanging" labels do not overlap with the title.
 
-    4. ALIGNMENT SYNC:
-    The Top Boxplot frame and Bottom Histogram frame are hard-linked on the 
-    X-axis. A vertical scan from a boxplot feature (like the Median line) 
-    will land perfectly on the corresponding value in the histogram.
+    4. ALIGNMENT SYNC: The top boxplot frame and bottom histogram frame are 
+    horizontally locked. A vertical scan from a statistical marker in the 
+    boxplot will align perfectly with the corresponding numeric bin below.
 
     RETURNS:
     --------
@@ -143,23 +150,30 @@ def smart_plot(data, chart_type='bar', sorting=None, ascending=True, show_na=Tru
     fig = plt.figure(figsize=size)
     
     if chart_type == 'hist' and show_boxplot:
-        gs = gridspec.GridSpec(2, 1, height_ratios=[1.5, 8.5], hspace=0.05)
+        # Increased height ratio for boxplot to fit dual-tier labels
+        gs = gridspec.GridSpec(2, 1, height_ratios=[2.2, 7.8], hspace=0.08)
         ax_box = fig.add_subplot(gs[0])
         ax = fig.add_subplot(gs[1])
     else:
         ax = fig.add_subplot(1, 1, 1)
 
-    # 3. PLOT EXECUTION
+    # 3. UNIVERSAL FORMATTER
+    comma_fmt = ticker.FuncFormatter(lambda x, p: f'{x:,.0f}')
+
+    # 4. PLOT EXECUTION
     if chart_type == 'bar':
         rects = ax.bar(counts.index.astype(str), counts.values, color=color, edgecolor='black')
         if show_labels:
-            ax.bar_label(rects, padding=3, rotation=label_rot, fmt='%g', fontweight='bold', color='black')
+            # Comma-separated whole integers for bar labels
+            ax.bar_label(rects, padding=3, rotation=label_rot, 
+                         labels=[f'{x:,.0f}' for x in counts.values], 
+                         fontweight='bold', color='black')
 
     elif chart_type == 'line':
         ax.plot(counts.index.astype(str), counts.values, marker='o', color=color, linewidth=2)
         if show_labels:
             for i, v in enumerate(counts.values):
-                ax.text(i, v + (max(counts.values)*0.02), f'{v:g}', 
+                ax.text(i, v + (max(counts.values)*0.02), f'{v:,.0f}', 
                         ha='right' if label_rot != 0 else 'center', rotation=label_rot, 
                         fontweight='bold', color='black')
 
@@ -167,57 +181,61 @@ def smart_plot(data, chart_type='bar', sorting=None, ascending=True, show_na=Tru
         ax.scatter(counts.index.astype(str), counts.values, color=color, s=100, edgecolor='black', alpha=0.7)
 
     elif chart_type == 'hist':
-        # Main Histogram
         n, bins, patches = ax.hist(plot_data, bins='auto', color=color, edgecolor='black', alpha=0.7)
+        ax.xaxis.set_major_formatter(comma_fmt) # Comma-formatted bins
         
         if show_boxplot:
-            # Boxplot in the 'Penthouse'
             stats = plot_data.describe()
             ax_box.boxplot(plot_data, vert=False, widths=0.4, patch_artist=True,
                            boxprops=dict(facecolor='white', color='black'),
                            medianprops=dict(color='red', linewidth=2))
             
-            # Persistent Black Labels
-            stat_vals = {'Min': stats['min'], 'Max': stats['max'], 'Med': stats['50%']}
-            for label, val in stat_vals.items():
-                ax_box.text(val, 1.4, f'{label}: {val:g}', ha='center', va='bottom', 
-                            color='black', fontsize=9, fontweight='bold')
+            # Tiered Labels: Black, Center-Aligned, Regular Weight, Small Font
+            # Top Tier: Min, Med, Max
+            top_stats = {'Min': stats['min'], 'Med': stats['50%'], 'Max': stats['max']}
+            for label, val in top_stats.items():
+                ax_box.text(val, 1.45, f'{label}: {val:,.0f}', ha='center', va='bottom', 
+                            color='black', fontsize=9)
+            
+            # Bottom Tier: Q1, Q3
+            bottom_stats = {'Q1': stats['25%'], 'Q3': stats['75%']}
+            for label, val in bottom_stats.items():
+                ax_box.text(val, 0.55, f'{label}: {val:,.0f}', ha='center', va='top', 
+                            color='black', fontsize=9)
             
             # Formatting Boxplot Frame
-            ax_box.set_xlim(ax.get_xlim()) # Sync scales
-            ax_box.set_xticks([])          # Hide middle tick labels
-            for spine in ax_box.spines.values(): spine.set_visible(True) # Full border
+            ax_box.set_xlim(ax.get_xlim()) 
+            ax_box.set_xticks([])          # Hide top x-ticks
+            ax_box.set_yticks([])          # Hide the "1"
+            for spine in ax_box.spines.values(): spine.set_visible(True)
 
-    # 4. MARGINS, SPINES, & THE SAFETY BUFFER
-    # Ensure full frames for main plot
+    # 5. MARGINS, SPINES, & THE SAFETY BUFFER
     for spine in ax.spines.values(): spine.set_visible(True)
 
-    # Rotate Ticks for everything (including numeric bins)
+    # Rotate Ticks and set Right-Alignment ("Hanging")
     ax.tick_params(axis='x', labelrotation=rotation)
     plt.setp(ax.get_xticklabels(), ha='right' if rotation != 0 else 'center')
 
     # Label Pad Math
     if xlabel:
         if chart_type == 'hist':
-            max_len = 6 # Typical number length
+            max_len = 8 # Accommodate comma-formatted bin numbers
         else:
             max_len = max([len(str(l)) for l in counts.index])
         
-        # Buffer calculation: Approx 4 pts per char if 90 degrees
         auto_pad = (max_len * 4) if rotation > 45 else 10
-        
-        # Option A: Relaxed padding if boxplot is off
         if not (chart_type == 'hist' and show_boxplot):
             auto_pad = auto_pad * 0.7 
             
         final_pad = auto_pad + (label_pad if label_pad is not None else 0)
         ax.set_xlabel(xlabel, labelpad=final_pad, fontweight='bold')
 
-    # 5. FINAL STYLING
+    # 6. FINAL STYLING
     if title:
         fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+    
     ax.set_ylabel(ylabel, fontweight='bold')
-    ax.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
+    ax.yaxis.set_major_formatter(comma_fmt)
     
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.show()
