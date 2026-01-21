@@ -1,0 +1,156 @@
+import pandas as pd
+import numpy as np
+
+def smart_bin(data, method='equal', n_bins=5, bin_edges=None, precision=0, include_na=True, std_levels=3):
+
+    """
+    smart_bin(data, method='equal', n_bins=5, bin_edges=None, precision=0, 
+            include_na=True, std_levels=3)
+
+    A professional-grade data transformation utility designed to convert continuous 
+    numerical data into discrete, labeled categories (bins). This function is 
+    specifically optimized to prepare data for visualization in 'smart_plot'.
+
+    The function supports automated statistical binning, manual overrides, and 
+    provides a unique "Decoder Ring" for standard deviation analysis.
+
+    BRACKET NOTATION EXPLAINED:
+    ---------------------------
+    The function uses traditional mathematical notation to describe the boundaries 
+    of each bin. Understanding these symbols is critical for data accuracy:
+
+    - '(' or ')' [Parentheses]: Indicates EXCLUSION. The number next to it is 
+    NOT included in that bin. For example, (10, 20] starts at 10.000001.
+    - '[' or ']' [Square Brackets]: Indicates INCLUSION. The number next to it 
+    IS part of that bin. For example, (10, 20] includes exactly 20.0.
+
+    Example: (10, 20] means "Greater than 10, but less than or equal to 20."
+
+    PARAMETERS:
+    -----------
+    data : array-like (List, NumPy Array, or Pandas Series)
+        The numerical column you wish to categorize.
+
+    method : str, default 'equal'
+        The logic used to determine where the "cuts" are made:
+        - 'equal'    : (Equal Width) Divides the range into N bins of the same size.
+        - 'quantile' : (Equal Frequency) Divides data so each bin has roughly the 
+                    same number of records (e.g., Deciles).
+        - 'stdev'    : (Standard Deviation) Centers bins around the Mean and moves 
+                    outward by Standard Deviations. Includes outlier "tails."
+        - 'custom'   : Uses the specific numbers provided in 'bin_edges'.
+
+    n_bins : int, default 5
+        Used by 'equal' and 'quantile' to set the number of desired groups.
+
+    bin_edges : list, optional
+        Only used when method='custom'. A list of numbers defining the boundaries, 
+        e.g., [0, 18, 65, 100] creates three bins: (0, 18], (18, 65], and (65, 100].
+
+    precision : int, default 0
+        The number of decimal places shown in the bin labels. Use 0 for whole 
+        numbers or higher values (e.g., 2) for precise scientific data.
+
+    include_na : bool, default True
+        If True, any empty/null values are placed into a bin labeled '[Missing]'. 
+        The brackets ensure visual consistency with the mathematical bins.
+
+    std_levels : int, default 3
+        Only used when method='stdev'. Determines how many Standard Deviations 
+        the function calculates. A level of 3 creates 8 bins: 
+        (< -3SD, -3 to -2, -2 to -1, -1 to Mean, Mean to +1, +1 to +2, +2 to +3, > +3SD).
+
+    RETURN VALUES:
+    --------------
+    The return type of this function is CONDITIONAL based on the 'method' used:
+
+    1. For 'equal', 'quantile', or 'custom':
+    - Returns: A single Pandas Series containing the binned labels.
+
+    2. For 'stdev':
+    - Returns: A Tuple (Series, DataFrame).
+        - The Series: The binned labels for your data (e.g., (150, 200]).
+        - The DataFrame (The Decoder): A 2-column "Decoder Table" that maps 
+        the Mathematical Range (Column 1) to the Statistical Level (Column 2).
+
+    ERROR HANDLING & FEEDBACK:
+    --------------------------
+    - Quantile Collisions: If your data has many repeating values (e.g., many 0s), 
+    standard quantile binning can fail. This function will automatically merge 
+    those bins and print a simple explanation: "We combined some groups because 
+    many of your data points have the exact same value."
+    - Custom Guardrails: If 'method' is set to 'custom' but no 'bin_edges' list 
+    is provided, the function will raise a clear ValueError.
+    """
+    s = pd.Series(data)
+    
+    # 1. STRATEGY: EQUAL WIDTH
+    if method == 'equal':
+        binned = pd.cut(s, bins=n_bins, precision=precision)
+        
+    # 2. STRATEGY: QUANTILE (Equal Frequency)
+    elif method == 'quantile':
+        try:
+            binned = pd.qcut(s, q=n_bins, precision=precision, duplicates='raise')
+        except ValueError:
+            print("\n[NOTE]: We combined some groups because many of your data points have the exact same value.")
+            binned = pd.qcut(s, q=n_bins, precision=precision, duplicates='drop')
+            
+    # 3. STRATEGY: CUSTOM
+    elif method == 'custom':
+        if bin_edges is None:
+            raise ValueError("For 'custom' method, you must provide a list of numbers to 'bin_edges'.")
+        binned = pd.cut(s, bins=bin_edges, precision=precision)
+        
+# 4. STRATEGY: STANDARD DEVIATION
+    elif method == 'stdev':
+        avg = s.mean()
+        std = s.std()
+        
+        # Calculate 9 edges to create 8 bins
+        cuts = [-np.inf, 
+                avg - 3*std, avg - 2*std, avg - 1*std, 
+                avg, 
+                avg + 1*std, avg + 2*std, avg + 3*std, 
+                np.inf]
+        
+        # Exact 8 labels to match the 8 bins created by the cuts
+        labels_a = [
+            f"< -{std_levels}SD",
+            f"-{std_levels}SD to -2SD",
+            "-2SD to -1SD",
+            "-1SD to Mean",
+            "Mean to +1SD",
+            "+1SD to +2SD",
+            f"+2SD to {std_levels}SD",
+            f"> +{std_levels}SD"
+        ]
+        
+        # Execute binning
+        binned = pd.cut(s, bins=cuts, precision=precision)
+        
+        # FIX: Generate the mathematical range strings directly from the 'cuts'
+        # This ensures the 'Range' array is ALWAYS length 8, matching 'labels_a'
+        range_labels = []
+        for i in range(len(cuts) - 1):
+            low = f"{cuts[i]:,.{precision}f}" if cuts[i] != -np.inf else "-inf"
+            high = f"{cuts[i+1]:,.{precision}f}" if cuts[i+1] != np.inf else "inf"
+            range_labels.append(f"({low}, {high}]")
+
+        decoder_df = pd.DataFrame({
+            'Range': range_labels,
+            'SD_Level': labels_a
+        })
+        
+    # HANDLE MISSING VALUES
+    if include_na:
+        # Categorical data needs the new category added before filling
+        if not binned.isna().all():
+            binned = binned.cat.add_categories("[Missing]")
+        binned = binned.fillna("[Missing]")
+
+    # RETURN LOGIC
+    if method == 'stdev':
+        return binned, decoder_df
+    else:
+        return binned
